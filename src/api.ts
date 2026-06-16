@@ -11,6 +11,8 @@ const demoNote: NoteWithMeta = {
   color: "#d8b86a",
   is_archived: false,
   is_pinned: true,
+  is_read_only: false,
+  reading_page: 0,
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
   tags: [{ id: "tag-demo", name: "Inbox", color: "#5f7d6a" }],
@@ -57,6 +59,8 @@ export const api = {
         color: note.color,
         is_archived: false,
         is_pinned: false,
+        is_read_only: note.is_read_only ?? false,
+        reading_page: note.reading_page ?? 0,
         created_at: now,
         updated_at: now,
         tags: [],
@@ -75,6 +79,12 @@ export const api = {
     call<void>("archive_note", { id, archived }, () => {
       const note = localNotes.find((item) => item.id === id);
       if (note) note.is_archived = archived;
+    }),
+
+  updateReadingPage: (noteId: string, readingPage: number) =>
+    call<void>("update_reading_page", { noteId, readingPage }, () => {
+      const note = localNotes.find((item) => item.id === noteId);
+      if (note) note.reading_page = Math.max(0, readingPage);
     }),
 
   upsertTag: (name: string, color: string) =>
@@ -109,6 +119,8 @@ export const api = {
   dockNearest: () => call<void>("dock_nearest_window"),
 
   undockWindow: () => call<void>("undock_window"),
+
+  toggleFullscreen: () => call<boolean>("toggle_fullscreen"),
 
   setAlwaysOnTop: (enabled: boolean) => call<void>("set_always_on_top", { enabled }),
 

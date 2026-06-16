@@ -5,6 +5,8 @@ export type Note = {
   color: string;
   is_archived: boolean;
   is_pinned: boolean;
+  is_read_only: boolean;
+  reading_page: number;
   created_at: string;
   updated_at: string;
 };

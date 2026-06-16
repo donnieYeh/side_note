@@ -44,11 +44,41 @@ function emptyNote(): NoteWithMeta {
     color: palette[0],
     is_archived: false,
     is_pinned: false,
+    is_read_only: false,
+    reading_page: 0,
     created_at: now,
     updated_at: now,
     tags: [],
     reminders: []
   };
+}
+
+function splitNovelPages(text: string, pageSize = 1500) {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return [""];
+  const pages: string[] = [];
+  let buffer = "";
+  for (const paragraph of normalized.split(/\n{2,}/)) {
+    const block = paragraph.trim();
+    if (!block) continue;
+    if (buffer.length && buffer.length + block.length + 2 > pageSize) {
+      pages.push(buffer.trim());
+      buffer = "";
+    }
+    if (block.length > pageSize) {
+      if (buffer.trim()) {
+        pages.push(buffer.trim());
+        buffer = "";
+      }
+      for (let index = 0; index < block.length; index += pageSize) {
+        pages.push(block.slice(index, index + pageSize));
+      }
+    } else {
+      buffer += `${buffer ? "\n\n" : ""}${block}`;
+    }
+  }
+  if (buffer.trim()) pages.push(buffer.trim());
+  return pages.length ? pages : [normalized];
 }
 
 function reminderPartsFromDate(date: Date): ReminderParts {
@@ -82,15 +112,18 @@ export function App() {
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [includeArchived, setIncludeArchived] = useState(false);
   const [draft, setDraft] = useState<NoteWithMeta>(emptyNote());
-  const [mode, setMode] = useState<"write" | "preview">("write");
+  const [mode, setMode] = useState<"write" | "preview">("preview");
   const [status, setStatus] = useState("Ready");
   const [highlightReminder, setHighlightReminder] = useState<string | null>(null);
-  const [isDocked, setIsDocked] = useState(false);
+  const [isDocked, setIsDocked] = useState(true);
   const [reminderMenuOpen, setReminderMenuOpen] = useState(false);
   const [reminderAt, setReminderAt] = useState<ReminderParts>(() => reminderPartsFromDate(new Date(Date.now() + 15 * 60_000)));
+  const [noteMenu, setNoteMenu] = useState<{ noteId: string; x: number; y: number } | null>(null);
+  const [pendingImportNoteId, setPendingImportNoteId] = useState<string | null>(null);
   const saveTimer = useRef<number | null>(null);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const collapseTimer = useRef<number | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeNote = useMemo(() => notes.find((note) => note.id === activeId), [activeId, notes]);
 
@@ -126,6 +159,19 @@ export function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    const closeMenu = () => setNoteMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setNoteMenu(null);
+    };
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, []);
+
   function updateDraft(patch: Partial<NoteWithMeta>) {
     const next = { ...draft, ...patch };
     setDraft(next);
@@ -140,7 +186,9 @@ export function App() {
       title: note.title.trim() || "Untitled",
       content_markdown: note.content_markdown,
       color: note.color,
-      is_pinned: note.is_pinned
+      is_pinned: note.is_pinned,
+      is_read_only: note.is_read_only,
+      reading_page: note.reading_page
     });
     setStatus("Saved");
     if (!activeId || activeId !== saved.id) setActiveId(saved.id);
@@ -247,6 +295,55 @@ export function App() {
     await refresh();
   }
 
+  async function archiveNoteById(id: string) {
+    await api.archiveNote(id, true);
+    setNoteMenu(null);
+    if (activeId === id) setActiveId(null);
+    await refresh();
+  }
+
+  async function deleteNoteById(id: string) {
+    await api.deleteNote(id);
+    setNoteMenu(null);
+    if (activeId === id) setActiveId(null);
+    await refresh();
+  }
+
+  function startImportText(noteId: string) {
+    setPendingImportNoteId(noteId);
+    setNoteMenu(null);
+    importInputRef.current?.click();
+  }
+
+  async function importTextFile(file: File) {
+    if (!pendingImportNoteId) return;
+    const note = notes.find((item) => item.id === pendingImportNoteId) ?? draft;
+    const text = await file.text();
+    const title = file.name.replace(/\.[^.]+$/, "") || note.title || "Imported Text";
+    const saved = await api.saveNote({
+      id: pendingImportNoteId,
+      title,
+      content_markdown: text,
+      color: note.color,
+      is_archived: false,
+      is_pinned: note.is_pinned,
+      is_read_only: true,
+      reading_page: 0
+    });
+    setPendingImportNoteId(null);
+    setActiveId(saved.id);
+    setDraft(saved);
+    setStatus("Text imported");
+    await refresh();
+  }
+
+  const setReadingPage = useCallback(async (page: number) => {
+    if (!draft.id) return;
+    const nextPage = Math.max(0, page);
+    setDraft((current) => ({ ...current, reading_page: nextPage }));
+    await api.updateReadingPage(draft.id, nextPage);
+  }, [draft.id]);
+
   async function handleLinkClick(event: React.MouseEvent<HTMLAnchorElement>, href?: string) {
     event.preventDefault();
     if (!href) return;
@@ -267,7 +364,21 @@ export function App() {
       style={{ ["--note-accent" as string]: draft.color }}
       onMouseEnter={revealDockedWindow}
       onMouseLeave={scheduleCollapse}
+      onContextMenu={(event) => {
+        if (!(event.target as HTMLElement).closest(".note-card")) event.preventDefault();
+      }}
     >
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".txt,text/plain"
+        className="hidden-file-input"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.currentTarget.value = "";
+          if (file) importTextFile(file).catch((error) => setStatus(error.message));
+        }}
+      />
       <aside className="sidebar">
         <div
           className="dragbar"
@@ -298,7 +409,17 @@ export function App() {
 
         <div className="note-list">
           {notes.map((note) => (
-            <button key={note.id} className={`note-card ${note.id === activeId ? "active" : ""}`} onClick={() => setActiveId(note.id)}>
+            <button
+              key={note.id}
+              className={`note-card ${note.id === activeId ? "active" : ""}`}
+              onClick={() => setActiveId(note.id)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setActiveId(note.id);
+                setNoteMenu({ noteId: note.id, x: event.clientX, y: event.clientY });
+              }}
+            >
               <span className="color-pin" style={{ background: note.color }} />
               <strong>{note.title}</strong>
               <small>{note.content_markdown.replace(/[#*_>`\-\[\]]/g, "").slice(0, 88) || "Empty note"}</small>
@@ -306,6 +427,17 @@ export function App() {
             </button>
           ))}
         </div>
+        {noteMenu && (
+          <div
+            className="note-context-menu"
+            style={{ left: noteMenu.x, top: noteMenu.y }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button onClick={() => archiveNoteById(noteMenu.noteId)}><Archive size={15} />Archive</button>
+            <button onClick={() => deleteNoteById(noteMenu.noteId)}><Trash2 size={15} />Delete</button>
+            <button onClick={() => startImportText(noteMenu.noteId)}><Plus size={15} />Import Text</button>
+          </div>
+        )}
 
         <label className="archive-toggle">
           <input type="checkbox" checked={includeArchived} onChange={(event) => setIncludeArchived(event.target.checked)} />
@@ -322,7 +454,7 @@ export function App() {
         >
           <div className="window-tools">
             <button title="Dock left" onClick={() => dock("left")}><ChevronLeft size={17} /></button>
-            <button title="Reveal" onClick={() => api.undockWindow().then(() => setIsDocked(false))}><Maximize2 size={16} /></button>
+            <button title="Fullscreen" onClick={() => api.toggleFullscreen().then(() => setIsDocked(false))}><Maximize2 size={16} /></button>
             <button title="Dock right" onClick={() => dock("right")}><ChevronRight size={17} /></button>
           </div>
           <div className="segmented">
@@ -332,7 +464,12 @@ export function App() {
         </header>
 
         <div className="editor-head">
-          <input className="title" value={draft.title} onChange={(event) => updateDraft({ title: event.target.value })} />
+          <input
+            className="title"
+            value={draft.title}
+            readOnly={draft.is_read_only}
+            onChange={(event) => updateDraft({ title: event.target.value })}
+          />
           <div className="swatches">
             {palette.map((color) => (
               <button key={color} className={draft.color === color ? "active" : ""} style={{ background: color }} onClick={() => updateDraft({ color })} />
@@ -351,7 +488,13 @@ export function App() {
         </div>
 
         <section className="editor-panel">
-          {mode === "write" ? (
+          {draft.is_read_only ? (
+            <NovelReader
+              content={draft.content_markdown}
+              page={draft.reading_page}
+              onPageChange={setReadingPage}
+            />
+          ) : mode === "write" ? (
             <div className="split-editor">
               <textarea
                 value={draft.content_markdown}
@@ -440,5 +583,108 @@ function MarkdownView({
     >
       {content}
     </ReactMarkdown>
+  );
+}
+
+function NovelReader({
+  content,
+  page,
+  onPageChange
+}: {
+  content: string;
+  page: number;
+  onPageChange: (page: number) => void;
+}) {
+  const readerRef = useRef<HTMLElement | null>(null);
+  const [pageSize, setPageSize] = useState(360);
+  const pages = useMemo(() => splitNovelPages(content, pageSize), [content, pageSize]);
+  const currentPage = Math.max(0, Math.min(page, pages.length - 1));
+  const canGoBack = currentPage > 0;
+  const canGoForward = currentPage < pages.length - 1;
+
+  useEffect(() => {
+    const element = readerRef.current;
+    if (!element) return;
+
+    const updatePageSize = () => {
+      const width = Math.max(240, element.clientWidth - 108);
+      const height = Math.max(180, element.clientHeight - 120);
+      const charsPerLine = Math.max(12, Math.floor(width / 17));
+      const linesPerPage = Math.max(6, Math.floor(height / 32));
+      setPageSize(Math.max(180, Math.floor(charsPerLine * linesPerPage * 0.62)));
+    };
+
+    updatePageSize();
+    const observer = new ResizeObserver(updatePageSize);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (pages.length > 0 && page >= pages.length) {
+      onPageChange(pages.length - 1);
+    }
+  }, [onPageChange, page, pages.length]);
+
+  const turn = useCallback((direction: -1 | 1) => {
+    const newPage = currentPage + direction;
+    if (newPage >= 0 && newPage < pages.length) {
+      onPageChange(newPage);
+    }
+  }, [currentPage, onPageChange, pages.length]);
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "ArrowLeft") turn(-1);
+      else if (event.key === "ArrowRight") turn(1);
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [turn]);
+
+  function handlePageClick(event: React.MouseEvent<HTMLDivElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = (event.clientX - rect.left) / rect.width;
+    if (ratio < 0.35 && canGoBack) turn(-1);
+    else if (ratio > 0.65 && canGoForward) turn(1);
+  }
+
+  return (
+    <article className="novel-reader" ref={readerRef} tabIndex={-1}>
+      <div
+        className="novel-page"
+        onClick={handlePageClick}
+        title="Click left or right edge to turn pages"
+      >
+        {pages[currentPage].split("\n").map((line, index) => (
+          <p key={`${currentPage}-${index}`}>{line || "\u00a0"}</p>
+        ))}
+      </div>
+      <nav className="novel-nav" aria-label="Page navigation">
+        <button
+          type="button"
+          className="novel-nav-btn"
+          title="Previous page"
+          onClick={() => turn(-1)}
+          disabled={!canGoBack}
+        >
+          <ChevronLeft size={17} />
+          Previous
+        </button>
+        <span className="novel-progress">
+          {currentPage + 1} / {pages.length}
+        </span>
+        <button
+          type="button"
+          className="novel-nav-btn"
+          title="Next page"
+          onClick={() => turn(1)}
+          disabled={!canGoForward}
+        >
+          Next
+          <ChevronRight size={17} />
+        </button>
+      </nav>
+    </article>
   );
 }

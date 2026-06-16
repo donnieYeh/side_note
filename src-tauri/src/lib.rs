@@ -49,6 +49,8 @@ struct Note {
     color: String,
     is_archived: bool,
     is_pinned: bool,
+    is_read_only: bool,
+    reading_page: i64,
     created_at: String,
     updated_at: String,
 }
@@ -87,6 +89,8 @@ struct SaveNoteInput {
     color: String,
     is_archived: Option<bool>,
     is_pinned: Option<bool>,
+    is_read_only: Option<bool>,
+    reading_page: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -115,6 +119,7 @@ pub fn run() {
             });
             configure_edge_hint(app)?;
             configure_window(app)?;
+            dock_on_startup(app.handle());
             start_mouse_release_watcher(app.handle().clone());
             configure_tray(app)?;
             Ok(())
@@ -123,6 +128,7 @@ pub fn run() {
             list_notes,
             list_tags,
             save_note,
+            update_reading_page,
             delete_note,
             archive_note,
             upsert_tag,
@@ -135,6 +141,7 @@ pub fn run() {
             dock_if_near_edge,
             dock_nearest_window,
             undock_window,
+            toggle_fullscreen,
             set_always_on_top,
             copy_text,
             open_external
@@ -168,6 +175,9 @@ fn configure_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
                 let app = focus_app_handle.clone();
                 thread::spawn(move || {
                     thread::sleep(Duration::from_millis(220));
+                    if window.is_fullscreen().unwrap_or(false) {
+                        return;
+                    }
                     if window.is_focused().unwrap_or(false) {
                         return;
                     }
@@ -188,12 +198,28 @@ fn configure_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
                 });
             }
             if let WindowEvent::Moved(_) = event {
+                if moved_window.is_fullscreen().unwrap_or(false) {
+                    hide_edge_hint(&moved_window);
+                    return;
+                }
                 let _ = update_edge_hint(&moved_window);
                 let _ = update_floating_top_state(&moved_window);
             }
         });
     }
     Ok(())
+}
+
+fn dock_on_startup(app: &tauri::AppHandle) {
+    let app = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(180));
+        let Some(window) = app.get_webview_window("main") else {
+            return;
+        };
+        let state = app.state::<AppState>();
+        let _ = animate_window_with_state(&window, &state, Some(EdgeSide::Right), false, true);
+    });
 }
 
 fn start_mouse_release_watcher(app: tauri::AppHandle) {
@@ -203,6 +229,11 @@ fn start_mouse_release_watcher(app: tauri::AppHandle) {
             let is_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 };
             if was_down && !is_down {
                 if let Some(window) = app.get_webview_window("main") {
+                    if window.is_fullscreen().unwrap_or(false) {
+                        was_down = is_down;
+                        thread::sleep(Duration::from_millis(35));
+                        continue;
+                    }
                     let side = {
                         let state = app.state::<AppState>();
                         let dock = match state.dock.lock() {
@@ -227,6 +258,11 @@ fn start_mouse_release_watcher(app: tauri::AppHandle) {
             }
             if !is_down {
                 if let Some(window) = app.get_webview_window("main") {
+                    if window.is_fullscreen().unwrap_or(false) {
+                        was_down = is_down;
+                        thread::sleep(Duration::from_millis(35));
+                        continue;
+                    }
                     let should_collapse = {
                         let state = app.state::<AppState>();
                         let dock = match state.dock.lock() {
@@ -274,6 +310,11 @@ fn start_mouse_release_watcher(app: tauri::AppHandle) {
             }
             if !is_down {
                 if let Some(window) = app.get_webview_window("main") {
+                    if window.is_fullscreen().unwrap_or(false) {
+                        was_down = is_down;
+                        thread::sleep(Duration::from_millis(35));
+                        continue;
+                    }
                     let side = {
                         let state = app.state::<AppState>();
                         let dock = match state.dock.lock() {
@@ -363,6 +404,8 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
           color text not null,
           is_archived integer not null default 0,
           is_pinned integer not null default 0,
+          is_read_only integer not null default 0,
+          reading_page integer not null default 0,
           created_at text not null,
           updated_at text not null
         );
@@ -394,7 +437,21 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
           value text not null
         );
         "#,
-    )
+    )?;
+    ensure_column(conn, "notes", "is_read_only", "integer not null default 0")?;
+    ensure_column(conn, "notes", "reading_page", "integer not null default 0")
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("pragma table_info({})", table))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+    conn.execute(&format!("alter table {} add column {} {}", table, column, definition), [])?;
+    Ok(())
 }
 
 fn seed_db(conn: &Connection) -> rusqlite::Result<()> {
@@ -440,7 +497,7 @@ fn list_notes(
     let mut stmt = conn
         .prepare(
             r#"
-            select distinct n.id, n.title, n.content_markdown, n.color, n.is_archived, n.is_pinned, n.created_at, n.updated_at
+            select distinct n.id, n.title, n.content_markdown, n.color, n.is_archived, n.is_pinned, n.is_read_only, n.reading_page, n.created_at, n.updated_at
             from notes n
             left join note_tags nt on nt.note_id = n.id
             where (?1 = 1 or n.is_archived = 0)
@@ -480,6 +537,7 @@ fn list_notes(
 #[tauri::command]
 fn list_tags(state: State<AppState>) -> Result<Vec<Tag>, String> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
+    cleanup_orphan_tags(&conn).map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare("select id, name, color from tags order by lower(name)")
         .map_err(|error| error.to_string())?;
@@ -508,7 +566,7 @@ fn save_note(state: State<AppState>, note: SaveNoteInput) -> Result<NoteWithMeta
 
     if exists.is_some() {
         conn.execute(
-            "update notes set title = ?2, content_markdown = ?3, color = ?4, is_archived = coalesce(?5, is_archived), is_pinned = coalesce(?6, is_pinned), updated_at = ?7 where id = ?1",
+            "update notes set title = ?2, content_markdown = ?3, color = ?4, is_archived = coalesce(?5, is_archived), is_pinned = coalesce(?6, is_pinned), is_read_only = coalesce(?7, is_read_only), reading_page = coalesce(?8, reading_page), updated_at = ?9 where id = ?1",
             params![
                 id,
                 note.title,
@@ -516,14 +574,16 @@ fn save_note(state: State<AppState>, note: SaveNoteInput) -> Result<NoteWithMeta
                 note.color,
                 note.is_archived.map(bool_to_i64),
                 note.is_pinned.map(bool_to_i64),
+                note.is_read_only.map(bool_to_i64),
+                note.reading_page,
                 now
             ],
         )
         .map_err(|error| error.to_string())?;
     } else {
         conn.execute(
-            "insert into notes (id, title, content_markdown, color, is_archived, is_pinned, created_at, updated_at)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            "insert into notes (id, title, content_markdown, color, is_archived, is_pinned, is_read_only, reading_page, created_at, updated_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
             params![
                 id,
                 note.title,
@@ -531,6 +591,8 @@ fn save_note(state: State<AppState>, note: SaveNoteInput) -> Result<NoteWithMeta
                 note.color,
                 note.is_archived.map(bool_to_i64).unwrap_or(0),
                 note.is_pinned.map(bool_to_i64).unwrap_or(0),
+                note.is_read_only.map(bool_to_i64).unwrap_or(0),
+                note.reading_page.unwrap_or(0),
                 now
             ],
         )
@@ -541,10 +603,22 @@ fn save_note(state: State<AppState>, note: SaveNoteInput) -> Result<NoteWithMeta
 }
 
 #[tauri::command]
+fn update_reading_page(state: State<AppState>, note_id: String, reading_page: i64) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    conn.execute(
+        "update notes set reading_page = ?2, updated_at = ?3 where id = ?1",
+        params![note_id, reading_page.max(0), Utc::now().to_rfc3339()],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn delete_note(state: State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     conn.execute("delete from notes where id = ?1", params![id])
         .map_err(|error| error.to_string())?;
+    cleanup_orphan_tags(&conn).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -610,6 +684,15 @@ fn set_note_tags(state: State<AppState>, note_id: String, tag_ids: Vec<String>) 
         .map_err(|error| error.to_string())?;
     }
     tx.commit().map_err(|error| error.to_string())?;
+    cleanup_orphan_tags(&conn).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn cleanup_orphan_tags(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "delete from tags where not exists (select 1 from note_tags nt where nt.tag_id = tags.id)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -726,6 +809,40 @@ fn undock_window(window: WebviewWindow, state: State<AppState>) -> Result<(), St
         .map_err(|error| error.to_string())?
         .side;
     animate_window_with_state(&window, &state, side, true, false)
+}
+
+#[tauri::command]
+fn toggle_fullscreen(window: WebviewWindow, state: State<AppState>) -> Result<bool, String> {
+    let currently_fullscreen = window.is_fullscreen().map_err(|error| error.to_string())?;
+    if currently_fullscreen {
+        window
+            .set_fullscreen(false)
+            .map_err(|error| error.to_string())?;
+        let side = state
+            .dock
+            .lock()
+            .map_err(|error| error.to_string())?
+            .side;
+        if side.is_some() {
+            thread::sleep(Duration::from_millis(120));
+            animate_window_with_state(&window, &state, side, false, true)?;
+        }
+        Ok(false)
+    } else {
+        hide_edge_hint(&window);
+        {
+            let mut dock = state.dock.lock().map_err(|error| error.to_string())?;
+            dock.collapsed = false;
+            dock.hint_side = None;
+        }
+        window
+            .set_always_on_top(true)
+            .map_err(|error| error.to_string())?;
+        window
+            .set_fullscreen(true)
+            .map_err(|error| error.to_string())?;
+        Ok(true)
+    }
 }
 
 #[tauri::command]
@@ -1006,7 +1123,7 @@ fn active_monitor(window: &WebviewWindow) -> Result<tauri::Monitor, String> {
 
 fn note_with_meta(conn: &Connection, id: &str) -> rusqlite::Result<NoteWithMeta> {
     let note = conn.query_row(
-        "select id, title, content_markdown, color, is_archived, is_pinned, created_at, updated_at from notes where id = ?1",
+        "select id, title, content_markdown, color, is_archived, is_pinned, is_read_only, reading_page, created_at, updated_at from notes where id = ?1",
         params![id],
         read_note,
     )?;
@@ -1064,8 +1181,10 @@ fn read_note(row: &rusqlite::Row) -> rusqlite::Result<Note> {
         color: row.get(3)?,
         is_archived: row.get::<_, i64>(4)? != 0,
         is_pinned: row.get::<_, i64>(5)? != 0,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        is_read_only: row.get::<_, i64>(6)? != 0,
+        reading_page: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
