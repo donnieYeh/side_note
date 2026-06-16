@@ -43,18 +43,22 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and publish release
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Side Note ${{ github.ref_name }}
-          releaseBody: |
-            Download an installer from the assets below.
+      - name: Build executable
+        run: npm run tauri:build
 
-            - **NSIS** (`.exe`): recommended installer
-            - **MSI**: Windows installer package
-          releaseDraft: false
-          prerelease: false
-          generateReleaseNotes: true
+      - name: Prepare release asset
+        shell: pwsh
+        run: |
+          $asset = "Side-Note-${{ github.ref_name }}-windows-x64.exe"
+          Copy-Item "src-tauri/target/release/side-note.exe" $asset
+          "ASSET_NAME=$asset" >> $env:GITHUB_ENV
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Side Note ${{ github.ref_name }}
+          body: |
+            Portable Windows executable — download and run directly, no installer required.
+          generate_release_notes: true
+          files: ${{ env.ASSET_NAME }}
