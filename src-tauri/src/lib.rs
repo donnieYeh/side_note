@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::Mutex,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use arboard::Clipboard;
@@ -31,6 +31,7 @@ const DEFAULT_WIDTH: u32 = 980;
 const DEFAULT_HEIGHT: u32 = 640;
 const DOCK_LEAVE_COLLAPSE_FAST_MS: u64 = 150;
 const DOCK_LEAVE_COLLAPSE_SMOOTH_MS: u64 = 900;
+const EDGE_REVEAL_DELAY_MS: u64 = 1000;
 const DOCK_ANIM_STEPS: i32 = 14;
 const DOCK_ANIM_STEP_MS: u64 = 10;
 
@@ -284,6 +285,7 @@ fn start_mouse_release_watcher(app: tauri::AppHandle) {
     thread::spawn(move || {
         let mut was_down = false;
         let mut peek_armed = false;
+        let mut edge_entered_at: Option<Instant> = None;
         let mut pointer_was_inside = false;
         let mut collapse_scheduled = false;
         loop {
@@ -350,16 +352,29 @@ fn start_mouse_release_watcher(app: tauri::AppHandle) {
                     if collapsed {
                         pointer_was_inside = false;
                         collapse_scheduled = false;
-                        if !animating && at_edge && !peek_armed {
-                            peek_armed = true;
-                            request_dock_toggle(&app, side, true, false);
-                        }
                         if !at_edge {
                             peek_armed = false;
+                            edge_entered_at = None;
+                        } else if animating {
+                            edge_entered_at = None;
+                        } else if !peek_armed {
+                            match edge_entered_at {
+                                None => edge_entered_at = Some(Instant::now()),
+                                Some(started)
+                                    if started.elapsed()
+                                        >= Duration::from_millis(EDGE_REVEAL_DELAY_MS) =>
+                                {
+                                    peek_armed = true;
+                                    edge_entered_at = None;
+                                    request_dock_toggle(&app, side, true, false);
+                                }
+                                Some(_) => {}
+                            }
                         }
                     } else {
                         if !at_edge {
                             peek_armed = false;
+                            edge_entered_at = None;
                         }
                         if pointer_inside {
                             pointer_was_inside = true;
