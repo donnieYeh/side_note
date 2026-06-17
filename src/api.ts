@@ -118,7 +118,11 @@ export const api = {
 
   dockNearest: () => call<void>("dock_nearest_window"),
 
+  isDockCollapsed: () => call<boolean>("is_dock_collapsed", undefined, () => false),
+
   undockWindow: () => call<void>("undock_window"),
+
+  setDockFastMode: (enabled: boolean) => call<void>("set_dock_fast_mode", { enabled }, () => undefined),
 
   toggleFullscreen: () => call<boolean>("toggle_fullscreen"),
 

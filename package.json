@@ -1,6 +1,6 @@
 {
   "name": "side-note",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
+    "dev:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-dev.ps1",
     "tauri:build": "tauri build --no-bundle",
     "tauri:bundle": "tauri build"
   },

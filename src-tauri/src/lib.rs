@@ -8,6 +8,7 @@ use std::{
 
 use arboard::Clipboard;
 use chrono::Utc;
+use log;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -16,6 +17,7 @@ use tauri::{
     Manager, PhysicalPosition, Position, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
     WindowEvent,
 };
+use tauri_plugin_log::{Target, TargetKind};
 use uuid::Uuid;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
@@ -27,6 +29,10 @@ const EDGE_HINT_NUMERATOR: i32 = 1;
 const EDGE_HINT_DENOMINATOR: i32 = 3;
 const DEFAULT_WIDTH: u32 = 980;
 const DEFAULT_HEIGHT: u32 = 640;
+const DOCK_LEAVE_COLLAPSE_FAST_MS: u64 = 150;
+const DOCK_LEAVE_COLLAPSE_SMOOTH_MS: u64 = 900;
+const DOCK_ANIM_STEPS: i32 = 14;
+const DOCK_ANIM_STEP_MS: u64 = 10;
 
 struct AppState {
     db: Mutex<Connection>,
@@ -39,6 +45,7 @@ struct DockState {
     collapsed: bool,
     animating: bool,
     hint_side: Option<EdgeSide>,
+    fast_dock: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,11 +107,32 @@ enum EdgeSide {
     Right,
 }
 
+fn log_level() -> log::LevelFilter {
+    let level = std::env::var("SIDE_NOTE_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "info".into());
+    match level.to_lowercase().as_str() {
+        "debug" | "trace" => log::LevelFilter::Debug,
+        "warn" | "warning" => log::LevelFilter::Warn,
+        "error" => log::LevelFilter::Error,
+        _ => log::LevelFilter::Info,
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([Target::new(TargetKind::LogDir {
+                    file_name: Some("side-note".into()),
+                })])
+                .level(log_level())
+                .build(),
+        )
         .setup(|app| {
             let db_path = app_data_path(app.handle())?;
+            log::info!("Side Note starting; data dir={:?}", db_path.parent());
             let conn = Connection::open(db_path).map_err(|error| error.to_string())?;
             init_db(&conn).map_err(|error| error.to_string())?;
             seed_db(&conn).map_err(|error| error.to_string())?;
@@ -115,6 +143,7 @@ pub fn run() {
                     collapsed: false,
                     animating: false,
                     hint_side: None,
+                    fast_dock: false,
                 }),
             });
             configure_edge_hint(app)?;
@@ -140,7 +169,9 @@ pub fn run() {
             dock_window,
             dock_if_near_edge,
             dock_nearest_window,
+            is_dock_collapsed,
             undock_window,
+            set_dock_fast_mode,
             toggle_fullscreen,
             set_always_on_top,
             copy_text,
@@ -193,7 +224,7 @@ fn configure_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
                         dock.side
                     };
                     if side.is_some() {
-                        let _ = animate_window_with_state(&window, &state, side, false, true);
+                        request_dock_toggle(&app, side, false, true);
                     }
                 });
             }
@@ -214,17 +245,47 @@ fn dock_on_startup(app: &tauri::AppHandle) {
     let app = app.clone();
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(180));
+        request_dock_toggle(&app, Some(EdgeSide::Right), false, true);
+    });
+}
+
+fn dock_leave_delay_ms(fast_dock: bool) -> u64 {
+    if fast_dock {
+        DOCK_LEAVE_COLLAPSE_FAST_MS
+    } else {
+        DOCK_LEAVE_COLLAPSE_SMOOTH_MS
+    }
+}
+
+fn request_dock_toggle(
+    app: &tauri::AppHandle,
+    side: Option<EdgeSide>,
+    reveal: bool,
+    collapsed_after: bool,
+) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
         let Some(window) = app.get_webview_window("main") else {
             return;
         };
+        if window.is_fullscreen().unwrap_or(false) {
+            return;
+        }
         let state = app.state::<AppState>();
-        let _ = animate_window_with_state(&window, &state, Some(EdgeSide::Right), false, true);
+        let _ = animate_window_with_state(&window, &state, side, reveal, collapsed_after);
     });
+}
+
+fn pointer_near_dock_window(window: &WebviewWindow) -> bool {
+    cursor_in_window(window).unwrap_or(false) || cursor_in_visible_edge(window).unwrap_or(false)
 }
 
 fn start_mouse_release_watcher(app: tauri::AppHandle) {
     thread::spawn(move || {
         let mut was_down = false;
+        let mut peek_armed = false;
+        let mut pointer_was_inside = false;
+        let mut collapse_scheduled = false;
         loop {
             let is_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 };
             if was_down && !is_down {
@@ -251,8 +312,7 @@ fn start_mouse_release_watcher(app: tauri::AppHandle) {
                         }
                     };
                     if side.is_some() {
-                        let state = app.state::<AppState>();
-                        let _ = animate_window_with_state(&window, &state, side, false, true);
+                        request_dock_toggle(&app, side, false, true);
                     }
                 }
             }
@@ -263,7 +323,7 @@ fn start_mouse_release_watcher(app: tauri::AppHandle) {
                         thread::sleep(Duration::from_millis(35));
                         continue;
                     }
-                    let should_collapse = {
+                    let (collapsed, side, animating, leave_delay_ms) = {
                         let state = app.state::<AppState>();
                         let dock = match state.dock.lock() {
                             Ok(dock) => dock,
@@ -273,67 +333,69 @@ fn start_mouse_release_watcher(app: tauri::AppHandle) {
                                 continue;
                             }
                         };
-                        !dock.animating
-                            && !dock.collapsed
-                            && dock.side.is_some()
-                            && !window.is_focused().unwrap_or(false)
-                            && !cursor_in_window(&window).unwrap_or(true)
+                        (
+                            dock.collapsed,
+                            dock.side,
+                            dock.animating,
+                            dock_leave_delay_ms(dock.fast_dock),
+                        )
                     };
-                    if should_collapse {
-                        thread::sleep(Duration::from_millis(260));
-                        let state = app.state::<AppState>();
-                        let side = {
-                            let dock = match state.dock.lock() {
-                                Ok(dock) => dock,
-                                Err(_) => {
-                                    was_down = is_down;
-                                    thread::sleep(Duration::from_millis(35));
-                                    continue;
+                    let at_edge = cursor_in_visible_edge(&window).unwrap_or(false);
+                    let pointer_inside = if !collapsed && at_edge {
+                        true
+                    } else {
+                        pointer_near_dock_window(&window)
+                    };
+
+                    if collapsed {
+                        pointer_was_inside = false;
+                        collapse_scheduled = false;
+                        if !animating && at_edge && !peek_armed {
+                            peek_armed = true;
+                            request_dock_toggle(&app, side, true, false);
+                        }
+                        if !at_edge {
+                            peek_armed = false;
+                        }
+                    } else {
+                        if !at_edge {
+                            peek_armed = false;
+                        }
+                        if pointer_inside {
+                            pointer_was_inside = true;
+                            collapse_scheduled = false;
+                        } else if pointer_was_inside && !collapse_scheduled && !animating && side.is_some() {
+                            pointer_was_inside = false;
+                            collapse_scheduled = true;
+                            let app = app.clone();
+                            thread::spawn(move || {
+                                thread::sleep(Duration::from_millis(leave_delay_ms));
+                                let Some(window) = app.get_webview_window("main") else {
+                                    return;
+                                };
+                                if window.is_fullscreen().unwrap_or(false) {
+                                    return;
                                 }
-                            };
-                            if dock.animating
-                                || dock.collapsed
-                                || dock.side.is_none()
-                                || window.is_focused().unwrap_or(false)
-                                || cursor_in_window(&window).unwrap_or(true)
-                            {
-                                None
-                            } else {
-                                dock.side
-                            }
-                        };
-                        if side.is_some() {
-                            let _ = animate_window_with_state(&window, &state, side, false, true);
+                                if pointer_near_dock_window(&window) {
+                                    return;
+                                }
+                                let state = app.state::<AppState>();
+                                let side = state
+                                    .dock
+                                    .lock()
+                                    .ok()
+                                    .and_then(|dock| {
+                                        if dock.animating || dock.collapsed {
+                                            None
+                                        } else {
+                                            dock.side
+                                        }
+                                    });
+                                if side.is_some() {
+                                    request_dock_toggle(&app, side, false, true);
+                                }
+                            });
                         }
-                    }
-                }
-            }
-            if !is_down {
-                if let Some(window) = app.get_webview_window("main") {
-                    if window.is_fullscreen().unwrap_or(false) {
-                        was_down = is_down;
-                        thread::sleep(Duration::from_millis(35));
-                        continue;
-                    }
-                    let side = {
-                        let state = app.state::<AppState>();
-                        let dock = match state.dock.lock() {
-                            Ok(dock) => dock,
-                            Err(_) => {
-                                was_down = is_down;
-                                thread::sleep(Duration::from_millis(35));
-                                continue;
-                            }
-                        };
-                        if dock.animating || !dock.collapsed {
-                            None
-                        } else {
-                            dock.side
-                        }
-                    };
-                    if side.is_some() && cursor_in_visible_edge(&window).unwrap_or(false) {
-                        let state = app.state::<AppState>();
-                        let _ = animate_window_with_state(&window, &state, side, true, false);
                     }
                 }
             }
@@ -377,6 +439,15 @@ fn configure_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>
             "show" => {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
+                    let state = app.state::<AppState>();
+                    let side = state
+                        .dock
+                        .lock()
+                        .ok()
+                        .and_then(|dock| if dock.collapsed { dock.side } else { None });
+                    if side.is_some() {
+                        let _ = animate_window_with_state(&window, &state, side, true, false);
+                    }
                     let _ = window.set_focus();
                 }
             }
@@ -802,6 +873,15 @@ fn dock_nearest_window(window: WebviewWindow, state: State<AppState>) -> Result<
 }
 
 #[tauri::command]
+fn is_dock_collapsed(state: State<AppState>) -> Result<bool, String> {
+    Ok(state
+        .dock
+        .lock()
+        .map_err(|error| error.to_string())?
+        .collapsed)
+}
+
+#[tauri::command]
 fn undock_window(window: WebviewWindow, state: State<AppState>) -> Result<(), String> {
     let side = state
         .dock
@@ -809,6 +889,16 @@ fn undock_window(window: WebviewWindow, state: State<AppState>) -> Result<(), St
         .map_err(|error| error.to_string())?
         .side;
     animate_window_with_state(&window, &state, side, true, false)
+}
+
+#[tauri::command]
+fn set_dock_fast_mode(state: State<AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .dock
+        .lock()
+        .map_err(|error| error.to_string())?
+        .fast_dock = enabled;
+    Ok(())
 }
 
 #[tauri::command]
@@ -885,6 +975,9 @@ fn animate_window_with_state(
         if dock.animating {
             return Ok(());
         }
+        if dock.collapsed == collapsed_after {
+            return Ok(());
+        }
         dock.animating = true;
     }
 
@@ -939,19 +1032,35 @@ fn animate_window_inner(
             .map_err(|error| error.to_string())?;
     }
 
-    let steps = 14;
-    let start_x = current.x;
-    let start_y = current.y;
-    for step in 1..=steps {
-        let t = step as f32 / steps as f32;
-        let eased = 1.0 - (1.0 - t).powi(3);
-        let x = start_x + ((target_x - start_x) as f32 * eased).round() as i32;
-        let y = start_y + ((target_y - start_y) as f32 * eased).round() as i32;
+    let fast_dock = state
+        .dock
+        .lock()
+        .map_err(|error| error.to_string())?
+        .fast_dock;
+
+    if fast_dock {
         window
-            .set_position(Position::Physical(PhysicalPosition { x, y }))
+            .set_position(Position::Physical(PhysicalPosition {
+                x: target_x,
+                y: target_y,
+            }))
             .map_err(|error| error.to_string())?;
-        thread::sleep(Duration::from_millis(10));
+    } else {
+        let steps = DOCK_ANIM_STEPS;
+        let start_x = current.x;
+        let start_y = current.y;
+        for step in 1..=steps {
+            let t = step as f32 / steps as f32;
+            let eased = 1.0 - (1.0 - t).powi(3);
+            let x = start_x + ((target_x - start_x) as f32 * eased).round() as i32;
+            let y = start_y + ((target_y - start_y) as f32 * eased).round() as i32;
+            window
+                .set_position(Position::Physical(PhysicalPosition { x, y }))
+                .map_err(|error| error.to_string())?;
+            thread::sleep(Duration::from_millis(DOCK_ANIM_STEP_MS));
+        }
     }
+
     let mut dock = state.dock.lock().map_err(|error| error.to_string())?;
     dock.side = Some(side);
     dock.collapsed = collapsed_after;
@@ -1091,11 +1200,11 @@ fn cursor_in_visible_edge(window: &WebviewWindow) -> Result<bool, String> {
 
     Ok(match side {
         EdgeSide::Left => {
-            point.x >= monitor_pos.x && point.x <= monitor_pos.x + EDGE_PEEK_PX + 12
+            point.x >= monitor_pos.x && point.x <= monitor_pos.x + EDGE_PEEK_PX + 28
         }
         EdgeSide::Right => {
             let right_edge = monitor_pos.x + monitor_size.width as i32;
-            point.x >= right_edge - EDGE_PEEK_PX - 12 && point.x <= right_edge
+            point.x >= right_edge - EDGE_PEEK_PX - 28 && point.x <= right_edge
         }
     })
 }

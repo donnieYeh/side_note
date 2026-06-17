@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default permissions for Side Note",
   "windows": ["main", "edge_hint"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "log:default"]
 }

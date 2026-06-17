@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -51,6 +51,124 @@ function emptyNote(): NoteWithMeta {
     tags: [],
     reminders: []
   };
+}
+
+const NOVEL_FONT_SIZE_KEY = "side-note:novel-font-size";
+const NOVEL_FONT_MIN = 12;
+const NOVEL_FONT_MAX = 28;
+const NOVEL_FONT_DEFAULT = 17;
+const NOVEL_LINE_HEIGHT = 1.72;
+const WHEEL_TURN_THRESHOLD = 120;
+const WHEEL_TURN_COOLDOWN_MS = 400;
+
+function loadNovelFontSize() {
+  const stored = localStorage.getItem(NOVEL_FONT_SIZE_KEY);
+  const parsed = stored ? Number(stored) : NOVEL_FONT_DEFAULT;
+  if (!Number.isFinite(parsed)) return NOVEL_FONT_DEFAULT;
+  return Math.min(NOVEL_FONT_MAX, Math.max(NOVEL_FONT_MIN, Math.round(parsed)));
+}
+
+function renderNovelPageContent(root: HTMLElement, pageText: string) {
+  root.replaceChildren();
+  for (const line of pageText.split("\n")) {
+    const p = document.createElement("p");
+    p.textContent = line || "\u00a0";
+    root.appendChild(p);
+  }
+}
+
+function novelPageFits(root: HTMLElement, maxHeight: number, pageText: string) {
+  renderNovelPageContent(root, pageText);
+  return root.scrollHeight <= maxHeight + 1;
+}
+
+function splitOverflowingNovelBlock(root: HTMLElement, maxHeight: number, block: string) {
+  const chunks: string[] = [];
+  let rest = block;
+  while (rest.length > 0) {
+    if (novelPageFits(root, maxHeight, rest)) {
+      chunks.push(rest);
+      break;
+    }
+    let lo = 1;
+    let hi = rest.length;
+    let best = 1;
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (novelPageFits(root, maxHeight, rest.slice(0, mid))) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    let cut = best;
+    const windowStart = Math.max(1, best - 24);
+    const slice = rest.slice(windowStart, best);
+    const lastBreak = Math.max(slice.lastIndexOf("\n"), slice.lastIndexOf(" "));
+    if (lastBreak >= 0) cut = windowStart + lastBreak + 1;
+    cut = Math.max(1, Math.min(cut, rest.length));
+    chunks.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).trimStart();
+  }
+  return chunks;
+}
+
+function paginateNovelByLayout(measureEl: HTMLElement, maxHeight: number, text: string) {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return [""];
+
+  const blocks = normalized.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
+  const pages: string[] = [];
+  let buffer = "";
+
+  const flush = () => {
+    if (buffer.trim()) {
+      pages.push(buffer.trim());
+      buffer = "";
+    }
+  };
+
+  for (const block of blocks) {
+    const candidate = buffer ? `${buffer}\n\n${block}` : block;
+    if (novelPageFits(measureEl, maxHeight, candidate)) {
+      buffer = candidate;
+      continue;
+    }
+    flush();
+    if (novelPageFits(measureEl, maxHeight, block)) {
+      buffer = block;
+      continue;
+    }
+    const pieces = splitOverflowingNovelBlock(measureEl, maxHeight, block);
+    if (pieces.length === 1) {
+      buffer = pieces[0];
+    } else {
+      pages.push(...pieces.slice(0, -1));
+      buffer = pieces[pieces.length - 1];
+    }
+  }
+  flush();
+  return pages.length ? pages : [normalized];
+}
+
+function syncNovelMeasureEl(pageEl: HTMLDivElement, measureEl: HTMLDivElement, fontSize: number) {
+  measureEl.className = pageEl.className;
+  measureEl.style.cssText = [
+    "position:fixed",
+    "left:-10000px",
+    "top:0",
+    "visibility:hidden",
+    "pointer-events:none",
+    "overflow:hidden"
+  ].join(";");
+  measureEl.style.width = `${pageEl.clientWidth}px`;
+  measureEl.style.height = `${pageEl.clientHeight}px`;
+  measureEl.style.fontSize = `${fontSize}px`;
+  measureEl.style.lineHeight = String(NOVEL_LINE_HEIGHT);
+  const computed = getComputedStyle(pageEl);
+  measureEl.style.padding = computed.padding;
+  measureEl.style.boxSizing = computed.boxSizing;
 }
 
 function splitNovelPages(text: string, pageSize = 1500) {
@@ -122,7 +240,6 @@ export function App() {
   const [pendingImportNoteId, setPendingImportNoteId] = useState<string | null>(null);
   const saveTimer = useRef<number | null>(null);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
-  const collapseTimer = useRef<number | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeNote = useMemo(() => notes.find((note) => note.id === activeId), [activeId, notes]);
@@ -145,6 +262,10 @@ export function App() {
   useEffect(() => {
     if (activeNote) setDraft(activeNote);
   }, [activeNote]);
+
+  useEffect(() => {
+    api.setDockFastMode(draft.is_read_only).catch(() => undefined);
+  }, [draft.is_read_only]);
 
   useEffect(() => {
     const timer = window.setInterval(async () => {
@@ -208,19 +329,9 @@ export function App() {
   }
 
   async function revealDockedWindow() {
-    if (collapseTimer.current) window.clearTimeout(collapseTimer.current);
-    if (!isDocked) return;
+    const collapsed = await api.isDockCollapsed().catch(() => false);
+    if (!collapsed) return;
     await api.undockWindow();
-  }
-
-  function scheduleCollapse() {
-    if (!isDocked) return;
-    if (collapseTimer.current) window.clearTimeout(collapseTimer.current);
-    collapseTimer.current = window.setTimeout(() => {
-      const active = document.activeElement;
-      const editing = active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement;
-      if (!editing) api.dockNearest().catch(() => undefined);
-    }, 900);
   }
 
   async function finishDrag(event: React.PointerEvent) {
@@ -363,7 +474,6 @@ export function App() {
       className="shell"
       style={{ ["--note-accent" as string]: draft.color }}
       onMouseEnter={revealDockedWindow}
-      onMouseLeave={scheduleCollapse}
       onContextMenu={(event) => {
         if (!(event.target as HTMLElement).closest(".note-card")) event.preventDefault();
       }}
@@ -596,8 +706,14 @@ function NovelReader({
   onPageChange: (page: number) => void;
 }) {
   const readerRef = useRef<HTMLElement | null>(null);
-  const [pageSize, setPageSize] = useState(360);
-  const pages = useMemo(() => splitNovelPages(content, pageSize), [content, pageSize]);
+  const pageRef = useRef<HTMLDivElement | null>(null);
+  const measureRef = useRef<HTMLDivElement | null>(null);
+  const wheelAccumulator = useRef(0);
+  const lastWheelTurnAt = useRef(0);
+  const [layoutTick, setLayoutTick] = useState(0);
+  const [fontSize, setFontSize] = useState(loadNovelFontSize);
+  const [pageInput, setPageInput] = useState("1");
+  const [pages, setPages] = useState<string[]>(() => splitNovelPages(content));
   const currentPage = Math.max(0, Math.min(page, pages.length - 1));
   const canGoBack = currentPage > 0;
   const canGoForward = currentPage < pages.length - 1;
@@ -605,19 +721,52 @@ function NovelReader({
   useEffect(() => {
     const element = readerRef.current;
     if (!element) return;
-
-    const updatePageSize = () => {
-      const width = Math.max(240, element.clientWidth - 108);
-      const height = Math.max(180, element.clientHeight - 120);
-      const charsPerLine = Math.max(12, Math.floor(width / 17));
-      const linesPerPage = Math.max(6, Math.floor(height / 32));
-      setPageSize(Math.max(180, Math.floor(charsPerLine * linesPerPage * 0.62)));
-    };
-
-    updatePageSize();
-    const observer = new ResizeObserver(updatePageSize);
+    let timer: number | undefined;
+    const observer = new ResizeObserver(() => {
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => setLayoutTick((tick) => tick + 1), 120);
+    });
     observer.observe(element);
-    return () => observer.disconnect();
+    return () => {
+      if (timer) window.clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const pageEl = pageRef.current;
+    if (!pageEl || pageEl.clientWidth <= 0 || pageEl.clientHeight <= 0) return;
+
+    if (!measureRef.current) {
+      const measureEl = document.createElement("div");
+      measureEl.setAttribute("aria-hidden", "true");
+      document.body.appendChild(measureEl);
+      measureRef.current = measureEl;
+    }
+
+    syncNovelMeasureEl(pageEl, measureRef.current, fontSize);
+    const nextPages = paginateNovelByLayout(measureRef.current, pageEl.clientHeight, content);
+    setPages((current) => (current.length === nextPages.length && current.every((value, index) => value === nextPages[index])
+      ? current
+      : nextPages));
+  }, [content, fontSize]);
+
+  useEffect(() => {
+    const pageEl = pageRef.current;
+    if (!pageEl || pageEl.clientWidth <= 0 || pageEl.clientHeight <= 0) return;
+
+    if (!measureRef.current) return;
+
+    syncNovelMeasureEl(pageEl, measureRef.current, fontSize);
+    const nextPages = paginateNovelByLayout(measureRef.current, pageEl.clientHeight, content);
+    setPages((current) => (current.length === nextPages.length && current.every((value, index) => value === nextPages[index])
+      ? current
+      : nextPages));
+  }, [content, fontSize, layoutTick]);
+
+  useEffect(() => () => {
+    measureRef.current?.remove();
+    measureRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -625,6 +774,10 @@ function NovelReader({
       onPageChange(pages.length - 1);
     }
   }, [onPageChange, page, pages.length]);
+
+  useEffect(() => {
+    setPageInput(String(currentPage + 1));
+  }, [currentPage]);
 
   const turn = useCallback((direction: -1 | 1) => {
     const newPage = currentPage + direction;
@@ -635,12 +788,60 @@ function NovelReader({
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (target instanceof HTMLInputElement && target.classList.contains("novel-page-input")) return;
       if (event.key === "ArrowLeft") turn(-1);
       else if (event.key === "ArrowRight") turn(1);
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
   }, [turn]);
+
+  function jumpToPageInput() {
+    const parsed = Number.parseInt(pageInput, 10);
+    if (!Number.isFinite(parsed)) {
+      setPageInput(String(currentPage + 1));
+      return;
+    }
+    const clamped = Math.min(pages.length, Math.max(1, parsed));
+    onPageChange(clamped - 1);
+    setPageInput(String(clamped));
+  }
+
+  function handlePageInputKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      jumpToPageInput();
+    } else if (event.key === "Escape") {
+      setPageInput(String(currentPage + 1));
+      event.currentTarget.blur();
+    }
+  }
+
+  function handleWheel(event: React.WheelEvent<HTMLDivElement>) {
+    if (event.ctrlKey) {
+      event.preventDefault();
+      const step = event.deltaY > 0 ? -1 : 1;
+      setFontSize((current) => {
+        const next = Math.min(NOVEL_FONT_MAX, Math.max(NOVEL_FONT_MIN, current + step));
+        localStorage.setItem(NOVEL_FONT_SIZE_KEY, String(next));
+        return next;
+      });
+      return;
+    }
+
+    event.preventDefault();
+    const now = Date.now();
+    if (now - lastWheelTurnAt.current < WHEEL_TURN_COOLDOWN_MS) return;
+
+    wheelAccumulator.current += event.deltaY;
+    if (Math.abs(wheelAccumulator.current) < WHEEL_TURN_THRESHOLD) return;
+
+    const direction = wheelAccumulator.current > 0 ? 1 : -1;
+    wheelAccumulator.current = 0;
+    lastWheelTurnAt.current = now;
+    turn(direction as -1 | 1);
+  }
 
   function handlePageClick(event: React.MouseEvent<HTMLDivElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -652,9 +853,12 @@ function NovelReader({
   return (
     <article className="novel-reader" ref={readerRef} tabIndex={-1}>
       <div
+        ref={pageRef}
         className="novel-page"
+        style={{ fontSize: `${fontSize}px`, lineHeight: NOVEL_LINE_HEIGHT }}
         onClick={handlePageClick}
-        title="Click left or right edge to turn pages"
+        onWheel={handleWheel}
+        title="Click edges to turn pages; scroll to turn; Ctrl+scroll to resize text"
       >
         {pages[currentPage].split("\n").map((line, index) => (
           <p key={`${currentPage}-${index}`}>{line || "\u00a0"}</p>
@@ -671,9 +875,19 @@ function NovelReader({
           <ChevronLeft size={17} />
           Previous
         </button>
-        <span className="novel-progress">
-          {currentPage + 1} / {pages.length}
-        </span>
+        <div className="novel-progress">
+          <input
+            className="novel-page-input"
+            type="text"
+            inputMode="numeric"
+            aria-label="Current page"
+            value={pageInput}
+            onChange={(event) => setPageInput(event.target.value.replace(/\D/g, ""))}
+            onKeyDown={handlePageInputKeyDown}
+            onBlur={jumpToPageInput}
+          />
+          <span className="novel-page-total">/ {pages.length}</span>
+        </div>
         <button
           type="button"
           className="novel-nav-btn"
