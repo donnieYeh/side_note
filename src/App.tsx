@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { api } from "./api";
 import type { EdgeSide, NoteWithMeta, Reminder, Tag } from "./types";
-import { WysiwygEditor } from "./WysiwygEditor";
+import { MdxNoteEditor } from "./MdxNoteEditor";
 
 const palette = ["#d8b86a", "#6d8c7c", "#b76e79", "#7386b6", "#9b745c", "#6f7f92"];
 const reminderPresets = [
@@ -603,8 +603,8 @@ export function App() {
               spellCheck
             />
           ) : (
-            <WysiwygEditor
-              key={activeId ?? "new"}
+            <MdxNoteEditor
+              noteId={activeId ?? "new"}
               value={draft.content_markdown}
               onChange={(content_markdown) => updateDraft({ content_markdown })}
               onLinkClick={handleLinkClick}
