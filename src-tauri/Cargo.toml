@@ -1,6 +1,6 @@
 [package]
 name = "side-note"
-version = "0.3.1"
+version = "0.3.2"
 description = "A dockable desktop sticky note widget."
 authors = ["Side Note"]
 edition = "2021"

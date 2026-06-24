@@ -12,16 +12,18 @@ import {
 } from "@mdxeditor/editor";
 import type { LexicalEditor } from "lexical";
 import "@mdxeditor/editor/style.css";
-import { cleanupMarkdownAfterCut, cutLexicalSelection } from "./mdxSelectionCut";
+import { cleanupMarkdownAfterCut, cutLexicalSelection, splitMarkdownBySelection, type MarkdownArchiveCut } from "./mdxSelectionCut";
 import { createLexicalEditorCapturePlugin } from "./mdxLexicalCapturePlugin";
 
-export type MdxNoteEditorCutResult = {
-  selectedMarkdown: string;
-  markdown: string;
-};
+export type MdxNoteEditorCutResult = MarkdownArchiveCut;
 
 export type MdxNoteEditorHandle = {
-  cutSelectionAndGetMarkdown: () => MdxNoteEditorCutResult | null;
+  prepareArchiveSelection: (
+    fallbackPlainText: string,
+    selectedMarkdownHint?: string,
+    sourceMarkdownHint?: string
+  ) => MdxNoteEditorCutResult | null;
+  setMarkdown: (markdown: string) => void;
 };
 
 export const MdxNoteEditor = forwardRef<MdxNoteEditorHandle, {
@@ -29,7 +31,7 @@ export const MdxNoteEditor = forwardRef<MdxNoteEditorHandle, {
   value: string;
   onChange: (markdown: string) => void;
   onLinkClick: (event: React.MouseEvent<HTMLAnchorElement>, href?: string) => void;
-  onSelectionContextMenu?: (payload: { x: number; y: number; text: string }) => void;
+  onSelectionContextMenu?: (payload: { x: number; y: number; text: string; markdown: string }) => void;
 }>(function MdxNoteEditor({
   noteId,
   value,
@@ -62,21 +64,55 @@ export const MdxNoteEditor = forwardRef<MdxNoteEditorHandle, {
   );
 
   useImperativeHandle(ref, () => ({
-    cutSelectionAndGetMarkdown: () => {
+    prepareArchiveSelection: (fallbackPlainText, selectedMarkdownHint = "", sourceMarkdownHint = "") => {
       const editor = editorRef.current;
       const lexicalEditor = lexicalEditorRef.current;
-      if (!editor || !lexicalEditor) return null;
+      if (!editor) return null;
 
-      const selectedMarkdown = editor.getSelectionMarkdown().trim();
-      if (!selectedMarkdown) return null;
-      if (!cutLexicalSelection(lexicalEditor)) return null;
+      const editorMarkdown = editor.getMarkdown();
+      const sourceCandidates = [...new Set([editorMarkdown, sourceMarkdownHint, value].filter(Boolean))];
+      const selectedFromEditor = editor.getSelectionMarkdown().trim();
+      const selectedCandidates = [...new Set([selectedFromEditor, selectedMarkdownHint, fallbackPlainText].filter(Boolean))];
 
-      const markdown = cleanupMarkdownAfterCut(editor.getMarkdown());
+      let split: MarkdownArchiveCut | null = null;
+      for (const sourceMarkdown of sourceCandidates) {
+        for (const selected of selectedCandidates) {
+          split = splitMarkdownBySelection(sourceMarkdown, selected, fallbackPlainText);
+          if (split) break;
+        }
+        if (split) break;
+      }
+      if (!split) return null;
+
+      if (lexicalEditor && selectedFromEditor && cutLexicalSelection(lexicalEditor)) {
+        const lexicalRemaining = cleanupMarkdownAfterCut(editor.getMarkdown());
+        if (lexicalRemaining !== cleanupMarkdownAfterCut(editorMarkdown)) {
+          synced.current = { noteId, value: lexicalRemaining };
+          ignoreChange.current = false;
+          return { selectedMarkdown: split.selectedMarkdown, remainingMarkdown: lexicalRemaining };
+        }
+        editor.setMarkdown(editorMarkdown);
+        synced.current = { noteId, value: editorMarkdown };
+      }
+
+      synced.current = { noteId, value: split.remainingMarkdown };
+      ignoreChange.current = true;
+      requestAnimationFrame(() => {
+        ignoreChange.current = false;
+      });
+      return split;
+    },
+    setMarkdown: (markdown: string) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      editor.setMarkdown(markdown);
       synced.current = { noteId, value: markdown };
-      ignoreChange.current = false;
-      return { selectedMarkdown, markdown };
+      ignoreChange.current = true;
+      requestAnimationFrame(() => {
+        ignoreChange.current = false;
+      });
     }
-  }), [noteId]);
+  }), [noteId, value]);
 
   useLayoutEffect(() => {
     ignoreChange.current = true;
@@ -122,7 +158,8 @@ export const MdxNoteEditor = forwardRef<MdxNoteEditorHandle, {
         if (!text) return;
         event.preventDefault();
         event.stopPropagation();
-        onSelectionContextMenu({ x: event.clientX, y: event.clientY, text });
+        const markdown = editorRef.current?.getSelectionMarkdown().trim() ?? text;
+        onSelectionContextMenu({ x: event.clientX, y: event.clientY, text, markdown });
       }}
     >
       <MDXEditor
