@@ -258,6 +258,8 @@ export function App() {
   const [pendingImportNoteId, setPendingImportNoteId] = useState<string | null>(null);
   const [confirmState, setConfirmState] = useState<{ options: ConfirmOptions; checked: boolean } | null>(null);
   const saveTimer = useRef<number | null>(null);
+  const draftTitleRef = useRef(draft.title);
+  const titleComposingRef = useRef(false);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const previewEditorRef = useRef<MdxNoteEditorHandle | null>(null);
@@ -281,6 +283,8 @@ export function App() {
     setDraft(note);
   }, []);
 
+  draftTitleRef.current = draft.title;
+
   const refresh = useCallback(async () => {
     const [nextNotes, nextTags] = await Promise.all([
       api.listNotes(query, activeTag, true),
@@ -302,7 +306,7 @@ export function App() {
     const nextVisible = filterVisibleNotes(cleanedNotes, includeArchived);
     if (activeId && emptyArchiveIds.includes(activeId)) {
       const mainNote = cleanedNotes.find(
-        (note) => !isArchiveCompanionTitle(note.title) && displayTitle(note.title) === displayTitle(draft.title)
+        (note) => !isArchiveCompanionTitle(note.title) && displayTitle(note.title) === displayTitle(draftTitleRef.current)
       );
       if (mainNote) {
         setActiveId(mainNote.id);
@@ -317,14 +321,25 @@ export function App() {
       selectNote(nextVisible[0]);
     }
     if (!nextVisible.length && !activeId) setDraft(emptyNote());
-  }, [activeId, activeTag, draft.title, includeArchived, query, selectNote]);
+  }, [activeId, activeTag, includeArchived, query, selectNote]);
 
   useEffect(() => {
     refresh().catch((error) => setStatus(error.message));
   }, [refresh]);
 
   useEffect(() => {
-    if (activeNote) setDraft(activeNote);
+    if (!activeNote) return;
+    setDraft((current) => {
+      if (current.id !== activeNote.id) return current;
+      if (saveTimer.current !== null || titleComposingRef.current) return current;
+      return {
+        ...activeNote,
+        title: current.title,
+        content_markdown: current.content_markdown,
+        color: current.color,
+        reading_page: current.reading_page
+      };
+    });
   }, [activeNote]);
 
   useEffect(() => {
@@ -903,7 +918,22 @@ export function App() {
             className="title"
             value={displayTitle(draft.title)}
             readOnly={draft.is_read_only || showArchivePane}
-            onChange={(event) => updateDraft({ title: event.target.value })}
+            onCompositionStart={() => {
+              titleComposingRef.current = true;
+              cancelPendingSave();
+            }}
+            onCompositionEnd={(event) => {
+              titleComposingRef.current = false;
+              updateDraft({ title: event.currentTarget.value });
+            }}
+            onChange={(event) => {
+              const title = event.target.value;
+              if (titleComposingRef.current) {
+                setDraft((current) => ({ ...current, title }));
+                return;
+              }
+              updateDraft({ title });
+            }}
           />
           <div className="swatches">
             {palette.map((color) => (
