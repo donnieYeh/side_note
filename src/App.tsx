@@ -1,15 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   Archive,
   Bell,
   Check,
   ChevronLeft,
   ChevronRight,
-  Copy,
+  Code,
   Eye,
-  EyeOff,
   Maximize2,
   Plus,
   Search,
@@ -18,6 +15,7 @@ import {
 } from "lucide-react";
 import { api } from "./api";
 import type { EdgeSide, NoteWithMeta, Reminder, Tag } from "./types";
+import { WysiwygEditor } from "./WysiwygEditor";
 
 const palette = ["#d8b86a", "#6d8c7c", "#b76e79", "#7386b6", "#9b745c", "#6f7f92"];
 const reminderPresets = [
@@ -230,7 +228,7 @@ export function App() {
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [includeArchived, setIncludeArchived] = useState(false);
   const [draft, setDraft] = useState<NoteWithMeta>(emptyNote());
-  const [mode, setMode] = useState<"write" | "preview">("preview");
+  const [mode, setMode] = useState<"preview" | "source">("preview");
   const [status, setStatus] = useState("Ready");
   const [highlightReminder, setHighlightReminder] = useState<string | null>(null);
   const [isDocked, setIsDocked] = useState(true);
@@ -326,12 +324,6 @@ export function App() {
   async function dock(side: EdgeSide) {
     await api.dockWindow(side);
     setIsDocked(true);
-  }
-
-  async function revealDockedWindow() {
-    const collapsed = await api.isDockCollapsed().catch(() => false);
-    if (!collapsed) return;
-    await api.undockWindow();
   }
 
   async function finishDrag(event: React.PointerEvent) {
@@ -473,7 +465,6 @@ export function App() {
     <main
       className="shell"
       style={{ ["--note-accent" as string]: draft.color }}
-      onMouseEnter={revealDockedWindow}
       onContextMenu={(event) => {
         if (!(event.target as HTMLElement).closest(".note-card")) event.preventDefault();
       }}
@@ -568,8 +559,8 @@ export function App() {
             <button title="Dock right" onClick={() => dock("right")}><ChevronRight size={17} /></button>
           </div>
           <div className="segmented">
-            <button className={mode === "write" ? "active" : ""} onClick={() => setMode("write")}><EyeOff size={15} />Edit</button>
-            <button className={mode === "preview" ? "active" : ""} onClick={() => setMode("preview")}><Eye size={15} />Read</button>
+            <button className={mode === "preview" ? "active" : ""} onClick={() => setMode("preview")}><Eye size={15} />Preview</button>
+            <button className={mode === "source" ? "active" : ""} onClick={() => setMode("source")}><Code size={15} />Source</button>
           </div>
         </header>
 
@@ -604,21 +595,20 @@ export function App() {
               page={draft.reading_page}
               onPageChange={setReadingPage}
             />
-          ) : mode === "write" ? (
-            <div className="split-editor">
-              <textarea
-                value={draft.content_markdown}
-                onChange={(event) => updateDraft({ content_markdown: event.target.value })}
-                spellCheck
-              />
-              <article className="markdown live">
-                <MarkdownView content={draft.content_markdown} onLinkClick={handleLinkClick} />
-              </article>
-            </div>
+          ) : mode === "source" ? (
+            <textarea
+              className="source-editor"
+              value={draft.content_markdown}
+              onChange={(event) => updateDraft({ content_markdown: event.target.value })}
+              spellCheck
+            />
           ) : (
-            <article className="markdown read">
-              <MarkdownView content={draft.content_markdown} onLinkClick={handleLinkClick} />
-            </article>
+            <WysiwygEditor
+              key={activeId ?? "new"}
+              value={draft.content_markdown}
+              onChange={(content_markdown) => updateDraft({ content_markdown })}
+              onLinkClick={handleLinkClick}
+            />
           )}
         </section>
 
@@ -670,29 +660,6 @@ export function App() {
         </footer>
       </section>
     </main>
-  );
-}
-
-function MarkdownView({
-  content,
-  onLinkClick
-}: {
-  content: string;
-  onLinkClick: (event: React.MouseEvent<HTMLAnchorElement>, href?: string) => void;
-}) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        a: ({ href, children }) => (
-          <a href={href} onClick={(event) => onLinkClick(event, href)} title="Click to copy, Ctrl+click to open">
-            <Copy size={12} />{children}
-          </a>
-        )
-      }}
-    >
-      {content}
-    </ReactMarkdown>
   );
 }
 
