@@ -271,6 +271,8 @@ button {
   min-height: 0;
   overflow: auto;
   padding-right: 2px;
+  align-content: start;
+  grid-auto-rows: max-content;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
 }
@@ -302,6 +304,7 @@ button {
   text-align: left;
   color: #f4f0e5;
   background: rgba(255, 255, 255, 0.08);
+  align-self: start;
 }
 
 .note-card.active {
@@ -353,6 +356,101 @@ button {
 
 .note-context-menu button:hover {
   background: rgba(45, 43, 38, 0.08);
+}
+
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(24, 22, 18, 0.28);
+}
+
+.confirm-dialog {
+  width: min(100%, 320px);
+  padding: 14px 16px 12px;
+  border: 1px solid rgba(43, 40, 34, 0.14);
+  border-radius: 10px;
+  background: #faf8f2;
+  box-shadow: 0 18px 46px rgba(35, 34, 30, 0.22);
+  color: #302d27;
+}
+
+.confirm-dialog h2 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: #24231f;
+}
+
+.confirm-dialog p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #5c574d;
+}
+
+.confirm-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #454138;
+  cursor: pointer;
+}
+
+.confirm-checkbox input {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.confirm-actions button {
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: 13px;
+}
+
+.confirm-cancel {
+  color: #454138;
+  background: rgba(45, 43, 38, 0.08);
+}
+
+.confirm-cancel:hover {
+  background: rgba(45, 43, 38, 0.12);
+}
+
+.confirm-primary,
+.confirm-danger {
+  color: #faf8f2;
+}
+
+.confirm-primary {
+  background: #6d8c7c;
+}
+
+.confirm-primary:hover {
+  background: #5f7c6d;
+}
+
+.confirm-danger {
+  background: #b76e79;
+}
+
+.confirm-danger:hover {
+  background: #a55f6a;
 }
 
 .color-pin {

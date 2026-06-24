@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
+  ArchiveRestore,
   Bell,
   Check,
   ChevronLeft,
@@ -15,7 +16,21 @@ import {
 } from "lucide-react";
 import { api } from "./api";
 import type { EdgeSide, NoteWithMeta, Reminder, Tag } from "./types";
-import { MdxNoteEditor } from "./MdxNoteEditor";
+import { MdxNoteEditor, type MdxNoteEditorHandle } from "./MdxNoteEditor";
+import { ConfirmDialog, type ConfirmOptions } from "./ConfirmDialog";
+import {
+  appendArchivedText,
+  archiveCompanionTitle,
+  displayTitle,
+  filterVisibleNotes,
+  findArchiveCompanion,
+  findDuplicateArchiveCompanions,
+  findMainNoteForCompanion,
+  isArchiveCompanionTitle,
+  isEmptyArchiveContent,
+  normalizeArchiveContent,
+  shouldPurgeArchiveNote
+} from "./archiveUtils";
 
 const MarkdownSourceEditor = lazy(() =>
   import("./MarkdownSourceEditor").then((module) => ({ default: module.MarkdownSourceEditor }))
@@ -239,12 +254,27 @@ export function App() {
   const [reminderMenuOpen, setReminderMenuOpen] = useState(false);
   const [reminderAt, setReminderAt] = useState<ReminderParts>(() => reminderPartsFromDate(new Date(Date.now() + 15 * 60_000)));
   const [noteMenu, setNoteMenu] = useState<{ noteId: string; x: number; y: number } | null>(null);
+  const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const [pendingImportNoteId, setPendingImportNoteId] = useState<string | null>(null);
+  const [confirmState, setConfirmState] = useState<{ options: ConfirmOptions; checked: boolean } | null>(null);
   const saveTimer = useRef<number | null>(null);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const previewEditorRef = useRef<MdxNoteEditorHandle | null>(null);
+  const confirmResolveRef = useRef<((result: { confirmed: boolean; checked: boolean }) => void) | null>(null);
 
   const activeNote = useMemo(() => notes.find((note) => note.id === activeId), [activeId, notes]);
+
+  const visibleNotes = useMemo(() => filterVisibleNotes(notes, includeArchived), [includeArchived, notes]);
+
+  const archiveCompanion = useMemo(() => {
+    if (!draft.id || isArchiveCompanionTitle(draft.title)) return undefined;
+    return findArchiveCompanion(notes, draft);
+  }, [draft, notes]);
+
+  const showArchivePane = isArchiveCompanionTitle(draft.title);
+  const editorMarkdown = draft.content_markdown;
+  const editorNoteId = activeId ?? "new";
 
   const selectNote = useCallback((note: NoteWithMeta) => {
     setActiveId(note.id);
@@ -253,17 +283,41 @@ export function App() {
 
   const refresh = useCallback(async () => {
     const [nextNotes, nextTags] = await Promise.all([
-      api.listNotes(query, activeTag, includeArchived),
+      api.listNotes(query, activeTag, true),
       api.listTags()
     ]);
-    setNotes(nextNotes);
-    setTags(nextTags);
-    if (!activeId && nextNotes[0]) {
-      setActiveId(nextNotes[0].id);
-      setDraft(nextNotes[0]);
+
+    const emptyArchiveIds = nextNotes
+      .filter((note) => shouldPurgeArchiveNote(nextNotes, note))
+      .map((note) => note.id);
+    for (const id of emptyArchiveIds) {
+      await api.deleteNote(id);
     }
-    if (!nextNotes.length && !activeId) setDraft(emptyNote());
-  }, [activeId, activeTag, includeArchived, query]);
+    const cleanedNotes = emptyArchiveIds.length
+      ? nextNotes.filter((note) => !emptyArchiveIds.includes(note.id))
+      : nextNotes;
+
+    setNotes(cleanedNotes);
+    setTags(nextTags);
+    const nextVisible = filterVisibleNotes(cleanedNotes, includeArchived);
+    if (activeId && emptyArchiveIds.includes(activeId)) {
+      const mainNote = cleanedNotes.find(
+        (note) => !isArchiveCompanionTitle(note.title) && displayTitle(note.title) === displayTitle(draft.title)
+      );
+      if (mainNote) {
+        setActiveId(mainNote.id);
+        setDraft(mainNote);
+      } else {
+        setActiveId(null);
+        setDraft(emptyNote());
+      }
+    }
+    if (!activeId && nextVisible[0]) {
+      setActiveId(nextVisible[0].id);
+      selectNote(nextVisible[0]);
+    }
+    if (!nextVisible.length && !activeId) setDraft(emptyNote());
+  }, [activeId, activeTag, draft.title, includeArchived, query, selectNote]);
 
   useEffect(() => {
     refresh().catch((error) => setStatus(error.message));
@@ -293,9 +347,15 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const closeMenu = () => setNoteMenu(null);
+    const closeMenu = () => {
+      setNoteMenu(null);
+      setSelectionMenu(null);
+    };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setNoteMenu(null);
+      if (event.key === "Escape") {
+        setNoteMenu(null);
+        setSelectionMenu(null);
+      }
     };
     window.addEventListener("click", closeMenu);
     window.addEventListener("keydown", closeOnEscape);
@@ -305,30 +365,97 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!activeId) return;
+    const visible = filterVisibleNotes(notes, includeArchived);
+    if (!visible.some((note) => note.id === activeId)) {
+      if (visible[0]) selectNote(visible[0]);
+      else {
+        setActiveId(null);
+        setDraft(emptyNote());
+      }
+    }
+  }, [activeId, includeArchived, notes, selectNote]);
+
+  function cancelPendingSave() {
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+  }
+
   function updateDraft(patch: Partial<NoteWithMeta>) {
     const next = { ...draft, ...patch };
     setDraft(next);
-    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    cancelPendingSave();
     saveTimer.current = window.setTimeout(() => persist(next), 500);
   }
 
   async function persist(note: NoteWithMeta) {
+    if (isArchiveCompanionTitle(note.title)) {
+      if (isEmptyArchiveContent(note.content_markdown)) {
+        if (note.id) {
+          for (const duplicate of findDuplicateArchiveCompanions(notes, note)) {
+            await api.deleteNote(duplicate.id);
+          }
+          await api.deleteNote(note.id);
+        }
+        await refresh();
+        return;
+      }
+      await api.saveNote({
+        id: note.id,
+        title: note.title,
+        content_markdown: note.content_markdown,
+        color: note.color,
+        is_archived: true,
+        is_pinned: false,
+        is_read_only: note.is_read_only,
+        reading_page: note.reading_page
+      });
+      setStatus("Saved");
+      await refresh();
+      return;
+    }
+
     if (!note.title.trim() && !note.content_markdown.trim()) return;
+    const existing = notes.find((item) => item.id === note.id);
+    const logicalTitle = displayTitle(note.title.trim()) || "Untitled";
     const saved = await api.saveNote({
       id: note.id || undefined,
-      title: note.title.trim() || "Untitled",
+      title: logicalTitle,
       content_markdown: note.content_markdown,
       color: note.color,
       is_pinned: note.is_pinned,
       is_read_only: note.is_read_only,
       reading_page: note.reading_page
     });
+    let companion = findArchiveCompanion(notes, { id: note.id, title: logicalTitle });
+    if (!companion && existing) {
+      const previousTitle = displayTitle(existing.title);
+      if (previousTitle !== logicalTitle) {
+        companion = findArchiveCompanion(notes, { id: note.id, title: previousTitle });
+      }
+    }
+    if (companion && companion.title !== archiveCompanionTitle(logicalTitle)) {
+      await api.saveNote({
+        id: companion.id,
+        title: archiveCompanionTitle(logicalTitle),
+        content_markdown: companion.content_markdown,
+        color: companion.color,
+        is_archived: true,
+        is_pinned: false,
+        is_read_only: companion.is_read_only,
+        reading_page: companion.reading_page
+      });
+    }
     setStatus("Saved");
     if (!activeId || activeId !== saved.id) setActiveId(saved.id);
     await refresh();
   }
 
   async function createNote() {
+    setIncludeArchived(false);
     const saved = await api.saveNote(emptyNote());
     setActiveId(saved.id);
     setDraft(saved);
@@ -405,8 +532,185 @@ export function App() {
     await refresh();
   }
 
+  async function handleTextArchive(_selectedText: string) {
+    if (!draft.id || draft.is_read_only || mode !== "preview" || showArchivePane || isArchiveCompanionTitle(draft.title)) return;
+    setSelectionMenu(null);
+    cancelPendingSave();
+
+    const cut = previewEditorRef.current?.cutSelectionAndGetMarkdown();
+    if (!cut) {
+      setStatus("Could not locate selected text");
+      return;
+    }
+
+    const logicalTitle = displayTitle(draft.title);
+    const companionTitle = archiveCompanionTitle(logicalTitle);
+    const companion = findArchiveCompanion(notes, draft);
+    const archivedMarkdown = cut.selectedMarkdown;
+    const newArchiveContent = appendArchivedText(companion?.content_markdown ?? "", archivedMarkdown);
+
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    const savedMain = await api.saveNote({
+      id: draft.id,
+      title: logicalTitle,
+      content_markdown: cut.markdown,
+      color: draft.color,
+      is_pinned: draft.is_pinned,
+      is_read_only: draft.is_read_only,
+      reading_page: draft.reading_page
+    });
+    const savedCompanion = await api.saveNote({
+      id: companion?.id,
+      title: companionTitle,
+      content_markdown: newArchiveContent,
+      color: draft.color,
+      is_archived: true,
+      is_pinned: false,
+      is_read_only: false,
+      reading_page: 0
+    });
+    if (companion) {
+      for (const duplicate of findDuplicateArchiveCompanions(notes, savedCompanion)) {
+        await api.deleteNote(duplicate.id);
+      }
+    }
+
+    setDraft({ ...savedMain, tags: draft.tags, reminders: draft.reminders });
+    setStatus("Archived selection");
+    await refresh();
+  }
+
+  async function handleTextUnarchive(_selectedText: string) {
+    if (!showArchivePane || mode !== "preview") return;
+    setSelectionMenu(null);
+    cancelPendingSave();
+
+    const priorArchiveContent = draft.content_markdown;
+    const cut = previewEditorRef.current?.cutSelectionAndGetMarkdown();
+    if (!cut) {
+      setStatus("Could not locate selected text");
+      return;
+    }
+
+    const mainNote = findMainNoteForCompanion(notes, draft);
+    if (!mainNote) {
+      setStatus("Main note not found");
+      return;
+    }
+
+    const logicalTitle = displayTitle(mainNote.title);
+    const restoredMarkdown = cut.selectedMarkdown;
+    const newMainContent = appendArchivedText(mainNote.content_markdown, restoredMarkdown);
+    const newArchiveContent = normalizeArchiveContent(cut.markdown);
+    const archiveEmptied =
+      isEmptyArchiveContent(newArchiveContent) ||
+      normalizeArchiveContent(priorArchiveContent) === normalizeArchiveContent(restoredMarkdown);
+
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    await api.saveNote({
+      id: mainNote.id,
+      title: logicalTitle,
+      content_markdown: newMainContent,
+      color: mainNote.color,
+      is_pinned: mainNote.is_pinned,
+      is_read_only: mainNote.is_read_only,
+      reading_page: mainNote.reading_page
+    });
+
+    if (archiveEmptied) {
+      for (const duplicate of findDuplicateArchiveCompanions(notes, draft)) {
+        await api.deleteNote(duplicate.id);
+      }
+      await api.deleteNote(draft.id);
+      const orphanArchiveIds = notes
+        .filter(
+          (note) =>
+            note.id !== draft.id &&
+            note.is_archived &&
+            displayTitle(note.title) === logicalTitle &&
+            isEmptyArchiveContent(note.content_markdown)
+        )
+        .map((note) => note.id);
+      for (const id of orphanArchiveIds) {
+        await api.deleteNote(id);
+      }
+      setActiveId(mainNote.id);
+      setDraft({ ...mainNote, content_markdown: newMainContent });
+      setStatus("Restored selection");
+      await refresh();
+      return;
+    }
+
+    await api.saveNote({
+      id: draft.id,
+      title: draft.title,
+      content_markdown: newArchiveContent,
+      color: draft.color,
+      is_archived: true,
+      is_pinned: false,
+      is_read_only: draft.is_read_only,
+      reading_page: draft.reading_page
+    });
+    for (const duplicate of findDuplicateArchiveCompanions(notes, draft)) {
+      await api.deleteNote(duplicate.id);
+    }
+
+    setDraft({ ...draft, content_markdown: newArchiveContent });
+    setStatus("Restored selection");
+    await refresh();
+  }
+
+  function askConfirm(options: ConfirmOptions): Promise<{ confirmed: boolean; checked: boolean }> {
+    return new Promise((resolve) => {
+      confirmResolveRef.current = resolve;
+      setConfirmState({ options, checked: options.defaultChecked ?? false });
+    });
+  }
+
+  function closeConfirm(confirmed: boolean) {
+    const checked = confirmState?.checked ?? false;
+    confirmResolveRef.current?.({ confirmed, checked });
+    confirmResolveRef.current = null;
+    setConfirmState(null);
+  }
+
+  async function confirmDeleteArchiveText(title: string): Promise<boolean> {
+    const { confirmed } = await askConfirm({
+      title: "Delete archived text",
+      message: `Remove archived content for "${title}"?`,
+      confirmLabel: "Delete",
+      destructive: true
+    });
+    return confirmed;
+  }
+
+  async function confirmDeleteMainNote(note: NoteWithMeta): Promise<{ proceed: boolean; deleteCompanion: boolean }> {
+    const title = displayTitle(note.title);
+    const companion = findArchiveCompanion(notes, note);
+    const { confirmed, checked } = await askConfirm({
+      title: "Delete note",
+      message: `Delete "${title}"? This cannot be undone.`,
+      confirmLabel: "Delete",
+      destructive: true,
+      checkboxLabel: companion ? `Also delete archived text for "${title}"` : undefined,
+      defaultChecked: false
+    });
+    if (!confirmed) return { proceed: false, deleteCompanion: false };
+    return { proceed: true, deleteCompanion: checked };
+  }
+
   async function handleDelete() {
     if (!draft.id) return;
+    if (isArchiveCompanionTitle(draft.title)) {
+      if (!(await confirmDeleteArchiveText(displayTitle(draft.title)))) return;
+      await api.deleteNote(draft.id);
+      setActiveId(null);
+      await refresh();
+      return;
+    }
+    const { proceed, deleteCompanion } = await confirmDeleteMainNote(draft);
+    if (!proceed) return;
+    if (deleteCompanion && archiveCompanion) await api.deleteNote(archiveCompanion.id);
     await api.deleteNote(draft.id);
     setActiveId(null);
     await refresh();
@@ -420,6 +724,22 @@ export function App() {
   }
 
   async function deleteNoteById(id: string) {
+    const note = notes.find((item) => item.id === id);
+    if (!note) return;
+    if (isArchiveCompanionTitle(note.title)) {
+      if (!(await confirmDeleteArchiveText(displayTitle(note.title)))) return;
+      await api.deleteNote(id);
+      setNoteMenu(null);
+      if (activeId === id) setActiveId(null);
+      await refresh();
+      return;
+    }
+    const { proceed, deleteCompanion } = await confirmDeleteMainNote(note);
+    if (!proceed) return;
+    if (deleteCompanion) {
+      const companion = findArchiveCompanion(notes, note);
+      if (companion) await api.deleteNote(companion.id);
+    }
     await api.deleteNote(id);
     setNoteMenu(null);
     if (activeId === id) setActiveId(null);
@@ -523,7 +843,7 @@ export function App() {
         </div>
 
         <div className="note-list">
-          {notes.map((note) => (
+          {visibleNotes.map((note) => (
             <button
               key={note.id}
               className={`note-card ${note.id === activeId ? "active" : ""}`}
@@ -536,7 +856,7 @@ export function App() {
               }}
             >
               <span className="color-pin" style={{ background: note.color }} />
-              <strong>{note.title}</strong>
+              <strong>{displayTitle(note.title)}</strong>
               <small>{note.content_markdown.replace(/[#*_>`\-\[\]]/g, "").slice(0, 88) || "Empty note"}</small>
               <span className="meta">{new Date(note.updated_at).toLocaleString()}</span>
             </button>
@@ -581,8 +901,8 @@ export function App() {
         <div className="editor-head">
           <input
             className="title"
-            value={draft.title}
-            readOnly={draft.is_read_only}
+            value={displayTitle(draft.title)}
+            readOnly={draft.is_read_only || showArchivePane}
             onChange={(event) => updateDraft({ title: event.target.value })}
           />
           <div className="swatches">
@@ -620,13 +940,33 @@ export function App() {
             </Suspense>
           ) : (
             <MdxNoteEditor
-              noteId={activeId ?? "new"}
-              value={draft.content_markdown}
+              ref={previewEditorRef}
+              noteId={editorNoteId}
+              value={editorMarkdown}
               onChange={(content_markdown) => updateDraft({ content_markdown })}
               onLinkClick={handleLinkClick}
+              onSelectionContextMenu={(payload) => setSelectionMenu(payload)}
             />
           )}
         </section>
+
+        {selectionMenu && mode === "preview" && !draft.is_read_only && (
+          <div
+            className="note-context-menu selection-context-menu"
+            style={{ left: selectionMenu.x, top: selectionMenu.y }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {showArchivePane ? (
+              <button onClick={() => handleTextUnarchive(selectionMenu.text)}>
+                <ArchiveRestore size={15} />UnArchive
+              </button>
+            ) : (
+              <button onClick={() => handleTextArchive(selectionMenu.text)}>
+                <Archive size={15} />Archive
+              </button>
+            )}
+          </div>
+        )}
 
         <footer className="actions">
           <div className="reminders">
@@ -675,6 +1015,16 @@ export function App() {
           </div>
         </footer>
       </section>
+      <ConfirmDialog
+        open={Boolean(confirmState)}
+        options={confirmState?.options ?? null}
+        checked={confirmState?.checked ?? false}
+        onCheckedChange={(checked) => {
+          setConfirmState((current) => (current ? { ...current, checked } : current));
+        }}
+        onConfirm={() => closeConfirm(true)}
+        onCancel={() => closeConfirm(false)}
+      />
     </main>
   );
 }

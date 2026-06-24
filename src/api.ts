@@ -57,7 +57,7 @@ export const api = {
         title: note.title,
         content_markdown: note.content_markdown,
         color: note.color,
-        is_archived: false,
+        is_archived: note.is_archived ?? false,
         is_pinned: false,
         is_read_only: note.is_read_only ?? false,
         reading_page: note.reading_page ?? 0,
