@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 import {
   MDXEditor,
   codeBlockPlugin,
@@ -24,7 +24,8 @@ export function MdxNoteEditor({
   onLinkClick: (event: React.MouseEvent<HTMLAnchorElement>, href?: string) => void;
 }) {
   const editorRef = useRef<MDXEditorMethods>(null);
-  const loadedNoteId = useRef<string | null>(null);
+  const synced = useRef({ noteId: "", value: "" });
+  const ignoreChange = useRef(true);
 
   const plugins = useMemo(
     () => [
@@ -39,10 +40,32 @@ export function MdxNoteEditor({
     []
   );
 
-  useEffect(() => {
-    if (loadedNoteId.current === noteId) return;
-    editorRef.current?.setMarkdown(value);
-    loadedNoteId.current = noteId;
+  useLayoutEffect(() => {
+    ignoreChange.current = true;
+
+    function syncEditor() {
+      const editor = editorRef.current;
+      if (!editor) return false;
+      if (synced.current.noteId === noteId && synced.current.value === value) {
+        return true;
+      }
+      editor.setMarkdown(value);
+      synced.current = { noteId, value };
+      return true;
+    }
+
+    if (!syncEditor()) {
+      const frame = requestAnimationFrame(() => {
+        syncEditor();
+        ignoreChange.current = false;
+      });
+      return () => cancelAnimationFrame(frame);
+    }
+
+    const frame = requestAnimationFrame(() => {
+      ignoreChange.current = false;
+    });
+    return () => cancelAnimationFrame(frame);
   }, [noteId, value]);
 
   return (
@@ -56,16 +79,18 @@ export function MdxNoteEditor({
       }}
     >
       <MDXEditor
+        key={noteId}
         ref={editorRef}
         markdown={value}
         plugins={plugins}
         className="mdx-editor-root"
-        contentEditableClassName="markdown read mdx-editor-content"
+        contentEditableClassName="markdown mdx-editor-content"
         placeholder="Start writing..."
         spellCheck
         toMarkdownOptions={{ bullet: "-", emphasis: "*" }}
         onChange={(markdown, initialMarkdownNormalize) => {
-          if (initialMarkdownNormalize) return;
+          if (initialMarkdownNormalize || ignoreChange.current) return;
+          synced.current = { noteId, value: markdown };
           onChange(markdown);
         }}
       />

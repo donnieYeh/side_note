@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   Bell,
@@ -16,6 +16,10 @@ import {
 import { api } from "./api";
 import type { EdgeSide, NoteWithMeta, Reminder, Tag } from "./types";
 import { MdxNoteEditor } from "./MdxNoteEditor";
+
+const MarkdownSourceEditor = lazy(() =>
+  import("./MarkdownSourceEditor").then((module) => ({ default: module.MarkdownSourceEditor }))
+);
 
 const palette = ["#d8b86a", "#6d8c7c", "#b76e79", "#7386b6", "#9b745c", "#6f7f92"];
 const reminderPresets = [
@@ -242,6 +246,11 @@ export function App() {
 
   const activeNote = useMemo(() => notes.find((note) => note.id === activeId), [activeId, notes]);
 
+  const selectNote = useCallback((note: NoteWithMeta) => {
+    setActiveId(note.id);
+    setDraft(note);
+  }, []);
+
   const refresh = useCallback(async () => {
     const [nextNotes, nextTags] = await Promise.all([
       api.listNotes(query, activeTag, includeArchived),
@@ -249,7 +258,10 @@ export function App() {
     ]);
     setNotes(nextNotes);
     setTags(nextTags);
-    if (!activeId && nextNotes[0]) setActiveId(nextNotes[0].id);
+    if (!activeId && nextNotes[0]) {
+      setActiveId(nextNotes[0].id);
+      setDraft(nextNotes[0]);
+    }
     if (!nextNotes.length && !activeId) setDraft(emptyNote());
   }, [activeId, activeTag, includeArchived, query]);
 
@@ -269,7 +281,9 @@ export function App() {
     const timer = window.setInterval(async () => {
       const due = await api.dueReminders();
       if (due[0]) {
-        setActiveId(due[0].note_id);
+        const dueNote = notes.find((note) => note.id === due[0].note_id);
+        if (dueNote) selectNote(dueNote);
+        else setActiveId(due[0].note_id);
         setHighlightReminder(due[0].id);
         await api.revealReminder(due[0].note_id, due[0].id);
         setStatus("Reminder due");
@@ -513,11 +527,11 @@ export function App() {
             <button
               key={note.id}
               className={`note-card ${note.id === activeId ? "active" : ""}`}
-              onClick={() => setActiveId(note.id)}
+              onClick={() => selectNote(note)}
               onContextMenu={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                setActiveId(note.id);
+                selectNote(note);
                 setNoteMenu({ noteId: note.id, x: event.clientX, y: event.clientY });
               }}
             >
@@ -596,12 +610,14 @@ export function App() {
               onPageChange={setReadingPage}
             />
           ) : mode === "source" ? (
-            <textarea
-              className="source-editor"
-              value={draft.content_markdown}
-              onChange={(event) => updateDraft({ content_markdown: event.target.value })}
-              spellCheck
-            />
+            <Suspense fallback={<div className="source-editor source-editor-loading">Loading editor…</div>}>
+              <MarkdownSourceEditor
+                key={activeId ?? "new"}
+                noteId={activeId ?? "new"}
+                value={draft.content_markdown}
+                onChange={(content_markdown) => updateDraft({ content_markdown })}
+              />
+            </Suspense>
           ) : (
             <MdxNoteEditor
               noteId={activeId ?? "new"}

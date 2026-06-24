@@ -243,10 +243,6 @@ fn configure_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
 }
 
 fn dock_on_startup(app: &tauri::AppHandle) {
-    // Dev builds stay expanded so restarts remain usable without hunting the edge peek.
-    if cfg!(debug_assertions) {
-        return;
-    }
     let app = app.clone();
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(180));
