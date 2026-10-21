@@ -42,6 +42,13 @@ export const api = {
       });
     }),
 
+  getNote: (id: string) =>
+    call<NoteWithMeta>("get_note", { id }, () => {
+      const note = localNotes.find((item) => item.id === id);
+      if (!note) throw new Error("Note not found");
+      return note;
+    }),
+
   listTags: () => call<Tag[]>("list_tags", undefined, () => localTags),
 
   saveNote: (note: Partial<NoteWithMeta> & Pick<NoteWithMeta, "title" | "content_markdown" | "color">) =>

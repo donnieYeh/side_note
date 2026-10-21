@@ -156,6 +156,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_notes,
+            get_note,
             list_tags,
             save_note,
             update_reading_page,
@@ -447,10 +448,14 @@ fn configure_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
 
-    TrayIconBuilder::new()
+    let mut tray = TrayIconBuilder::new()
         .menu(&menu)
-        .show_menu_on_left_click(true)
-        .on_menu_event(|app, event| match event.id().as_ref() {
+        .tooltip("Side Note")
+        .show_menu_on_left_click(true);
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
@@ -618,6 +623,12 @@ fn list_notes(
         });
     }
     Ok(notes)
+}
+
+#[tauri::command]
+fn get_note(state: State<AppState>, id: String) -> Result<NoteWithMeta, String> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    note_with_meta(&conn, &id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]

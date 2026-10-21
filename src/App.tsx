@@ -265,6 +265,12 @@ export function App() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const previewEditorRef = useRef<MdxNoteEditorHandle | null>(null);
   const confirmResolveRef = useRef<((result: { confirmed: boolean; checked: boolean }) => void) | null>(null);
+  const noteListRef = useRef<HTMLDivElement | null>(null);
+  const notesRef = useRef(notes);
+  const selectNoteRef = useRef<(note: NoteWithMeta) => void>(() => undefined);
+  const revealingReminderNoteIdRef = useRef<string | null>(null);
+  const pendingScrollNoteIdRef = useRef<string | null>(null);
+  const lastHandledReminderIdRef = useRef<string | null>(null);
 
   const activeNote = useMemo(() => notes.find((note) => note.id === activeId), [activeId, notes]);
 
@@ -284,6 +290,8 @@ export function App() {
     setDraft(note);
   }, []);
 
+  notesRef.current = notes;
+  selectNoteRef.current = selectNote;
   draftTitleRef.current = draft.title;
 
   const refresh = useCallback(async () => {
@@ -347,20 +355,65 @@ export function App() {
     api.setDockFastMode(draft.is_read_only).catch(() => undefined);
   }, [draft.is_read_only]);
 
+  const jumpToReminderNote = useCallback(async (noteId: string, reminderId: string) => {
+    setQuery("");
+    setActiveTag(null);
+
+    let note = notesRef.current.find((item) => item.id === noteId);
+    if (!note) {
+      try {
+        note = await api.getNote(noteId);
+      } catch {
+        setStatus("Reminder note not found");
+        return;
+      }
+    }
+
+    if (note.is_archived || isArchiveCompanionTitle(note.title)) {
+      setIncludeArchived(true);
+    }
+
+    setNotes((current) => (current.some((item) => item.id === note.id) ? current : [note, ...current]));
+    revealingReminderNoteIdRef.current = noteId;
+    pendingScrollNoteIdRef.current = noteId;
+    selectNoteRef.current(note);
+    setHighlightReminder(reminderId);
+    setStatus("Reminder due");
+    await api.revealReminder(noteId, reminderId);
+  }, []);
+
   useEffect(() => {
     const timer = window.setInterval(async () => {
-      const due = await api.dueReminders();
-      if (due[0]) {
-        const dueNote = notes.find((note) => note.id === due[0].note_id);
-        if (dueNote) selectNote(dueNote);
-        else setActiveId(due[0].note_id);
-        setHighlightReminder(due[0].id);
-        await api.revealReminder(due[0].note_id, due[0].id);
-        setStatus("Reminder due");
+      try {
+        const due = await api.dueReminders();
+        if (!due[0]) {
+          lastHandledReminderIdRef.current = null;
+          return;
+        }
+        if (lastHandledReminderIdRef.current === due[0].id) {
+          await api.revealReminder(due[0].note_id, due[0].id);
+          return;
+        }
+        lastHandledReminderIdRef.current = due[0].id;
+        await jumpToReminderNote(due[0].note_id, due[0].id);
+      } catch {
+        // Ignore transient reminder poll failures.
       }
     }, 15000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [jumpToReminderNote]);
+
+  useLayoutEffect(() => {
+    const noteId = pendingScrollNoteIdRef.current;
+    if (!noteId || activeId !== noteId) return;
+    const card = noteListRef.current?.querySelector(`[data-note-id="${CSS.escape(noteId)}"]`);
+    if (!card) return;
+    card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    pendingScrollNoteIdRef.current = null;
+    if (revealingReminderNoteIdRef.current === noteId) {
+      revealingReminderNoteIdRef.current = null;
+    }
+  }, [activeId, visibleNotes]);
 
   useEffect(() => {
     const closeMenu = (event: MouseEvent) => {
@@ -385,6 +438,7 @@ export function App() {
 
   useEffect(() => {
     if (!activeId) return;
+    if (revealingReminderNoteIdRef.current === activeId) return;
     const visible = filterVisibleNotes(notes, includeArchived);
     if (!visible.some((note) => note.id === activeId)) {
       if (visible[0]) selectNote(visible[0]);
@@ -1024,10 +1078,11 @@ export function App() {
           ))}
         </div>
 
-        <div className="note-list">
+        <div className="note-list" ref={noteListRef}>
           {visibleNotes.map((note) => (
             <button
               key={note.id}
+              data-note-id={note.id}
               className={`note-card ${note.id === activeId ? "active" : ""}`}
               onClick={() => selectNote(note)}
               onContextMenu={(event) => {
