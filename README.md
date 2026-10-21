@@ -2,7 +2,7 @@
 
 Side Note is a dockable desktop sticky note for quick thoughts, links, and small tasks. Keep it tucked against the edge of your screen, then bring it forward when you need it.
 
-![Side Note desktop app showing a tagged Markdown note](docs/images/side-note.png)
+![Side Note desktop app showing an English sample note with a tag](docs/images/side-note.png)
 
 ## Features
 

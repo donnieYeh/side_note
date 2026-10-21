@@ -47,6 +47,15 @@ struct DockState {
     animating: bool,
     hint_side: Option<EdgeSide>,
     fast_dock: bool,
+    monitor_topology: Vec<MonitorBounds>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MonitorBounds {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,6 +154,7 @@ pub fn run() {
                     animating: false,
                     hint_side: None,
                     fast_dock: false,
+                    monitor_topology: Vec::new(),
                 }),
             });
             configure_edge_hint(app)?;
@@ -191,6 +201,12 @@ fn app_data_path(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std::error::
 
 fn configure_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(window) = app.get_webview_window("main") {
+        if let Ok(topology) = monitor_topology(&window) {
+            let state = window.state::<AppState>();
+            if let Ok(mut dock) = state.dock.lock() {
+                dock.monitor_topology = topology;
+            };
+        }
         window.set_always_on_top(false)?;
         window.set_resizable(false)?;
         window.set_skip_taskbar(true)?;
@@ -235,6 +251,7 @@ fn configure_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
                     hide_edge_hint(&moved_window);
                     return;
                 }
+                let _ = handle_monitor_topology_change(&moved_window);
                 let _ = update_edge_hint(&moved_window);
                 let _ = update_floating_top_state(&moved_window);
             }
@@ -289,7 +306,23 @@ fn start_mouse_release_watcher(app: tauri::AppHandle) {
         let mut edge_entered_at: Option<Instant> = None;
         let mut pointer_was_inside = false;
         let mut collapse_scheduled = false;
+        let mut last_monitor_check = Instant::now();
         loop {
+            if last_monitor_check.elapsed() >= Duration::from_millis(500) {
+                last_monitor_check = Instant::now();
+                if let Some(window) = app.get_webview_window("main") {
+                    if !window.is_fullscreen().unwrap_or(false)
+                        && handle_monitor_topology_change(&window).unwrap_or(false)
+                    {
+                        peek_armed = false;
+                        edge_entered_at = None;
+                        pointer_was_inside = false;
+                        collapse_scheduled = false;
+                        let _ = update_edge_hint(&window);
+                        let _ = update_floating_top_state(&window);
+                    }
+                }
+            }
             let is_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 };
             if was_down && !is_down {
                 if let Some(window) = app.get_webview_window("main") {
@@ -1246,6 +1279,73 @@ fn cursor_in_window(window: &WebviewWindow) -> Result<bool, String> {
             && point.y >= current.y
             && point.y <= current.y + outer_size.height as i32,
     )
+}
+
+fn monitor_topology(window: &WebviewWindow) -> Result<Vec<MonitorBounds>, String> {
+    let mut monitors = window
+        .available_monitors()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            MonitorBounds {
+                x: position.x,
+                y: position.y,
+                width: size.width,
+                height: size.height,
+            }
+        })
+        .collect::<Vec<_>>();
+    if monitors.is_empty() {
+        return Err("No monitors available".to_string());
+    }
+    monitors.sort_unstable();
+    Ok(monitors)
+}
+
+fn handle_monitor_topology_change(window: &WebviewWindow) -> Result<bool, String> {
+    let topology = monitor_topology(window)?;
+    let state = window.state::<AppState>();
+    let (side, collapsed) = {
+        let mut dock = state.dock.lock().map_err(|error| error.to_string())?;
+        if dock.monitor_topology == topology || dock.animating {
+            return Ok(false);
+        }
+        dock.monitor_topology = topology;
+        dock.hint_side = None;
+        (dock.side, dock.collapsed)
+    };
+
+    hide_edge_hint(window);
+    let Some(side) = side else {
+        return Ok(true);
+    };
+
+    let monitor = active_monitor(window)?;
+    let monitor_pos = monitor.position();
+    let monitor_size = monitor.size();
+    let outer_size = window.outer_size().map_err(|error| error.to_string())?;
+    let current = window.outer_position().map_err(|error| error.to_string())?;
+    let right_edge = monitor_pos.x + monitor_size.width as i32;
+    let x = match (side, collapsed) {
+        (EdgeSide::Left, false) => monitor_pos.x,
+        (EdgeSide::Left, true) => monitor_pos.x - outer_size.width as i32 + EDGE_PEEK_PX,
+        (EdgeSide::Right, false) => right_edge - outer_size.width as i32,
+        (EdgeSide::Right, true) => right_edge - EDGE_PEEK_PX,
+    };
+    let min_y = monitor_pos.y;
+    let max_y = (monitor_pos.y + monitor_size.height as i32 - outer_size.height as i32)
+        .max(min_y);
+    let y = current.y.clamp(min_y, max_y);
+
+    window
+        .set_always_on_top(true)
+        .map_err(|error| error.to_string())?;
+    window
+        .set_position(Position::Physical(PhysicalPosition { x, y }))
+        .map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 fn active_monitor(window: &WebviewWindow) -> Result<tauri::Monitor, String> {
