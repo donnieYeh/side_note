@@ -1,95 +1,102 @@
 # Side Note
 
-Dockable desktop sticky notes built with Tauri, React, TypeScript, and SQLite.
+Side Note is a dockable desktop sticky note for quick thoughts, links, and small tasks. Keep it tucked against the edge of your screen, then bring it forward when you need it.
+
+![Side Note desktop app showing a tagged Markdown note](docs/images/side-note.png)
+
+## Features
+
+- Dock the window to the left or right edge of the screen.
+- Write notes in a rendered Markdown editor or edit Markdown source directly.
+- Search notes and organize them with tags and colors.
+- Set reminders for notes and tasks.
+- Archive a whole note or selected text, then restore it later.
+- Import plain text files into a read-only, paged reading view.
+- Keep notes in a local SQLite database. Side Note does not require an account or cloud sync.
+
+## Download
+
+Tagged releases publish a portable Windows x64 executable on the [GitHub Releases page](https://github.com/donnieYeh/side_note/releases). Download the latest release asset and run the `.exe`; no installer is required.
+
+### Supported platform
+
+Windows x64 is the only platform with a published build. macOS and Linux builds are not currently available.
+
+## Quick start
+
+1. Download and run the latest Windows x64 executable from [Releases](https://github.com/donnieYeh/side_note/releases).
+2. Select **+** to create a note, then type in the editor. Use **Preview** for formatted Markdown or **Source** for Markdown text.
+3. Use the arrow buttons in the toolbar to dock Side Note to the left or right edge of the screen.
+4. Select the bell button to add a reminder. Select **Archive** to move a note out of the active list.
+
+Notes are stored on this computer at `%APPDATA%\com.local.sidenote\side-note.sqlite3`.
+
+## Roadmap
+
+These are tentative priorities and may change:
+
+- Improve note backup and export options.
+- Add more keyboard-first workflows.
+- Explore macOS and Linux support, including alternatives to the current Windows-specific docking behavior.
+
+## Contributing
+
+Bug reports, feature requests, and focused pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and submission guidance.
 
 ## Development
 
+### Prerequisites
+
+- Node.js LTS
+- Rust stable with the MSVC toolchain
+- Microsoft C++ Build Tools and WebView2 on Windows
+
+See the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for installation details.
+
+### Run the app
+
 ```powershell
-npm install
+npm ci
 npm run tauri:dev
 ```
 
-Dev server runs on **http://localhost:5173** (5174 is often reserved by Windows/Hyper-V on some machines).
-
-**If you also run other local Tauri apps** (e.g. Typemore on port 1420), keep Side Note on 5173. Both `vite.config.ts` and `src-tauri/tauri.conf.json` `devUrl` must use the same port — otherwise the Side Note window can load the wrong app's UI from a shared dev server.
-
-To stop only this project's dev processes:
+`tauri:dev` starts the Vite development server and the desktop app together. To stop only this project's development processes, run:
 
 ```powershell
 npm run dev:stop
 ```
 
-## Build Policy
-
-Default packaging should produce only the standalone executable. Do not build MSI or NSIS installers unless explicitly requested.
-
-Use:
+### Build
 
 ```powershell
 npm run tauri:build
 ```
 
-Expected output:
-
-```text
-src-tauri/target/release/side-note.exe
-```
-
-The `tauri:build` script intentionally runs `tauri build --no-bundle` so future builds do not spend time producing installer packages.
-
-Installer builds are kept as an explicit opt-in command only:
+This builds the frontend and produces a standalone executable at `src-tauri/target/release/side-note.exe`. To create installer packages instead, run the opt-in command:
 
 ```powershell
 npm run tauri:bundle
 ```
 
+For regular development, use `npm run tauri:dev` so the development server starts automatically. A raw `cargo run --release` expects an existing `dist/` and does not start Vite; run `npm run build` first, or use `npm run tauri:build` for the full release build sequence.
+
 ## Troubleshooting
 
-Side Note writes application logs to help diagnose issues such as the window becoming unresponsive or popping out unexpectedly while typing in another app.
-
-### Log file location
-
-On Windows, logs are stored at:
+Side Note writes diagnostic logs to:
 
 ```text
 %APPDATA%\com.local.sidenote\logs\side-note.log
 ```
 
-Open File Explorer, paste `%APPDATA%\com.local.sidenote` into the address bar, then open the `logs` folder.
-
-The SQLite database lives in the same parent folder: `side-note.sqlite3`.
-
-### Enable debug logging
-
-Close Side Note, then start it from PowerShell with debug logging enabled:
+To enable debug logging, close the app and start it from PowerShell:
 
 ```powershell
 $env:SIDE_NOTE_LOG = "debug"
 & "C:\path\to\side-note.exe"
 ```
 
-You can also use `$env:RUST_LOG = "side_note=debug"` instead of `SIDE_NOTE_LOG`.
+For a useful bug report, include the Windows version, display scaling, number of monitors, mouse or touchpad, dock side, and whether reminders were scheduled. Attach the log when it contains relevant details, after checking it for personal information.
 
-### Collecting logs for bug reports
+## License
 
-**Unresponsive after fast clicks**
-
-1. Start Side Note with debug logging (see above).
-2. Reproduce the freeze by clicking quickly (note list, dock buttons, etc.).
-3. Close the app and send `side-note.log`.
-
-**Window pops out while typing elsewhere**
-
-1. Start with debug logging.
-2. Dock Side Note to an edge so it collapses to the peek strip.
-3. Switch to another app (browser, Word, etc.) and type for 1–2 minutes.
-4. Note whether your mouse or touchpad was near the screen edge when the window appeared.
-5. Send `side-note.log`.
-
-**Please include with the log**
-
-- Windows version and display scaling (100%, 125%, 150%, etc.)
-- Number of monitors
-- Touchpad vs mouse
-- Which edge Side Note is docked on (left or right)
-- Whether any reminders were scheduled
+Side Note is licensed under the MIT License. See [LICENSE](LICENSE).
